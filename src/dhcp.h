@@ -105,7 +105,8 @@ struct dhcp_t; /* Forward declaration */
 
 #define DHCP_DOMAIN_LEN      30
 
-#define DHCP_DNAT_MAX       128
+//#define DHCP_DNAT_MAX      128
+#define DHCP_DNAT_MAX        512
 
 struct dhcp_nat_t {
   uint8_t mac[PKT_ETH_ALEN];
@@ -133,6 +134,7 @@ struct dhcp_conn_t {
 
   time_t lasttime;             /* Last time we heard anything from client */
   uint8_t hismac[PKT_ETH_ALEN];/* Peer's MAC address */
+  char    shismac[MACSTRLEN+1];/* His MAC String address */
   struct in_addr ourip;        /* IP address to listen to */
   struct in_addr hisip;        /* Client IP address */
   struct in_addr hismask;      /* Client Network Mask */
@@ -140,6 +142,15 @@ struct dhcp_conn_t {
   struct in_addr dns2;         /* Client DNS address */
   char domain[DHCP_DOMAIN_LEN];/* Domain name to use for DNS lookups */
   int authstate;               /* 0: Unauthenticated, 1: Authenticated */
+
+  time_t authtime;	       /* first auth pass */
+  time_t authdrop;	       /* authdrop state */
+
+  time_t packettime;	       /* packet last time */
+  uint32_t packets;	       /* packet per seconds */
+  uint32_t synpackets;	       /* packet per seconds */
+  time_t packetfirsttime;      /* packet first time */
+
   uint8_t unauth_cp;           /* Unauthenticated codepoint */
   uint8_t auth_cp;             /* Authenticated codepoint */
   int nextdnat;                /* Next location to use for DNAT */
