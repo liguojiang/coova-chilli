@@ -147,6 +147,7 @@ struct redir_conn_t {
   uint32_t nasport;
   uint8_t hismac[PKT_ETH_ALEN];/* His MAC address */
   uint8_t ourmac[PKT_ETH_ALEN];/* Our MAC address */
+  char    shismac[MACSTRLEN+1];/* His MAC String address */
   struct in_addr ourip;        /* IP address to listen to */
   struct in_addr hisip;        /* Client IP address */
 
@@ -207,6 +208,11 @@ typedef struct _redir_request {
   bstring ibuf;
 
   time_t last_active;
+
+  /*
+   *	Guojiang Li
+   */
+  int connChecks;
 
   struct sockaddr_in baddr;
 
