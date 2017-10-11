@@ -701,14 +701,22 @@ int redir_accept2(struct redir_t *redir, int idx) {
   struct sockaddr_in baddress;
   socklen_t addrlen;
   char buffer[128];
+  static int connAbort = 0;
 
   addrlen = sizeof(struct sockaddr_in);
 
   if ((new_socket = safe_accept(redir->fd[idx],
 				(struct sockaddr *)&address,
 				&addrlen)) < 0) {
-    if (errno != ECONNABORTED)
-      syslog(LOG_ERR, "%s: accept()", strerror(errno));
+    if (errno != ECONNABORTED) {
+      syslog(LOG_ERR, "%s: accept(), [%d], [%d]", strerror(errno), idx, getpid());
+      connAbort++;
+      /*
+       *	FIXME
+       *	Guojiang Li
+       */
+      if ( connAbort >= 32 ) exit(0);
+    }
 
     return 0;
   }
@@ -802,6 +810,7 @@ int main(int argc, char **argv) {
   int idx;
   int active_last = 0;
   int active = 0;
+  int ret = 0;
 
   struct redir_t *redir;
 
@@ -846,8 +855,8 @@ int main(int argc, char **argv) {
     return -1;
   }
 
-  if (redir_listen(redir)) {
-    syslog(LOG_ERR, "Failed to create redir listen");
+  if ( ( ret=redir_listen(redir))) {
+    syslog(LOG_ERR, "Failed to create redir listen. ret=[%d]", ret);
     return -1;
   }
 
@@ -1098,6 +1107,18 @@ int main(int argc, char **argv) {
                                          &requests[idx])) {
                         case 1:
                           /*syslog(LOG_DEBUG, "redir cont'ed");*/
+
+			  /*
+			   *	FIXME
+			   *	Retry Check SSL 
+			   *	By Guojiang Li
+			   */
+			  requests[idx].connChecks++;
+			  if ( requests[idx].connChecks > 1024 ) {
+			  	requests[idx].connChecks = 0;
+                          	redir_conn_finish(&requests[idx].conn,
+                                            &requests[idx]);
+			  }
 #ifdef HAVE_SSL
                           if (requests[idx].sslcon &&
                               openssl_pending(requests[idx].sslcon) > 0) {
@@ -1107,8 +1128,10 @@ int main(int argc, char **argv) {
 #endif
                           break;
                         case -1:
+			  requests[idx].connChecks = 0;
                           syslog(LOG_DEBUG, "redir error");
                         default:
+			  requests[idx].connChecks = 0;
                           syslog(LOG_DEBUG, "redir completed");
                           redir_conn_finish(&requests[idx].conn,
                                             &requests[idx]);
