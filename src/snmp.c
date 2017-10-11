@@ -24,7 +24,7 @@ int handle_GetTotalPortalSessions(netsnmp_mib_handler *handler,
     unsigned long int total = kmod_coova_total_sessions();
     switch (reqinfo->mode) {
     case MODE_GET:
-    	snmp_set_var_typed_value(requests->requestvb, ASN_INTEGER, &total, sizeof(int));
+    	snmp_set_var_typed_value(requests->requestvb, ASN_INTEGER, (const u_char *)&total, sizeof(int));
         break;
 
     default:
