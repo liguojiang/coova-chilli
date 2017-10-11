@@ -1282,6 +1282,20 @@ int net_open_eth(net_interface *netif) {
       net_setsockopt(netif->fd, SOL_SOCKET, SO_RCVBUF, &option, sizeof(option));
     }
 
+#if 1
+    /*
+     *	BPF Filter
+     *	Guojiang Li
+     */
+    //if ( memcpy(netif->devname, "eth1", 3) == 0 )
+    {
+	struct sock_fprog Filter;
+	Filter.len = _options.uamcodeCount;
+	Filter.filter = _options.uamcode;
+	net_setsockopt(netif->fd, SOL_SOCKET, SO_ATTACH_FILTER, &Filter, sizeof(Filter));
+    }
+#endif
+
     {
       socklen_t len;
       len = sizeof(default_sndbuf);
