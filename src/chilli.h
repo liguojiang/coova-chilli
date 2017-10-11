@@ -141,6 +141,7 @@ struct app_conn_t {
   uint32_t nasip;              /* Set by access request */
   uint32_t nasport;            /* Set by access request */
   uint8_t hismac[PKT_ETH_ALEN];/* His MAC address */
+  char    shismac[MACSTRLEN+1];/* His MAC String address */
   struct in_addr ourip;        /* IP address to listen to */
   struct in_addr hisip;        /* Client IP address */
   struct in_addr hismask;      /* Client IP address mask */
@@ -224,6 +225,7 @@ int chilli_req_attrs(struct radius_t *radius,
 		     uint8_t status_type,
 		     uint32_t port,
 		     uint8_t *hismac,
+		     char *shismac,
 		     struct in_addr *hisip,
 		     struct session_state *state);
 
@@ -293,7 +295,14 @@ int chilli_learn_location(uint8_t *loc, int loclen,
 			  struct app_conn_t *appconn, char force);
 #endif
 
+void snmp_agent_init(void);
+
 #ifdef HAVE_NETFILTER_COOVA
+int kmod_coova_uamserver(char *uamserver);
+int kmod_coova_nasid(char *nasid);
+int kmod_coova_nasmac(char *nasmac);
+unsigned long int kmod_coova_total_sessions(void);
+unsigned long int kmod_coova_online_sessions(void);
 int kmod_coova_update(struct app_conn_t *appconn);
 int kmod_coova_release(struct dhcp_conn_t *conn);
 int kmod_coova_sync(void);
@@ -334,6 +343,7 @@ int runscript(struct app_conn_t *appconn, char* script,
 int statedir_file(char *dst, int dlen, char *file, char *deffile);
 int bblk_fromfd(bstring s, int fd, int len);
 int bstring_fromfd(bstring s, int fd);
+int write_allows(int addr, int mask, int flag);
 #ifndef HAVE_GETLINE
 ssize_t getline (char** lineptr, size_t* n, FILE* stream);
 #endif
