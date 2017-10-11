@@ -21,6 +21,9 @@
 
 static char * kname_fmt = "/proc/net/coova/%s";
 
+static unsigned long int totalSessions = 0;
+static unsigned long int onlineSessions = 0;
+
 static int
 kmod(char cmd, struct in_addr *addr) {
   char file[128];
@@ -46,6 +49,49 @@ kmod(char cmd, struct in_addr *addr) {
   return 0;
 }
 
+static int
+kmod_allows(char *cmd, char *param) {
+  char file[128];
+  char line[256];
+  int fd, rd;
+
+  if (!_options.kname) return -1;
+  snprintf(file, sizeof(file), kname_fmt, "allows");
+  fd = open(file, O_RDWR, 0);
+  if (fd > 0) {
+      snprintf(line, sizeof(line), "%s%s\n", cmd, param);
+
+    rd = safe_write(fd, line, strlen(line));
+    syslog(LOG_DEBUG, "kmod cmd wrote %d %s", rd, line);
+    close(fd);
+    return rd == strlen(line);
+  } else {
+    syslog(LOG_ERR, "%s: could not open %s", strerror(errno), file);
+  }
+  return 0;
+}
+
+int
+kmod_coova_uamserver(char *uamserver) {
+  if (_options.debug)
+    syslog(LOG_DEBUG, "%s(%d): uamserver [%s]", __FUNCTION__, __LINE__, uamserver);
+  return kmod_allows("P", uamserver);
+}
+
+int
+kmod_coova_nasid(char *nasid) {
+  if (_options.debug)
+    syslog(LOG_DEBUG, "%s(%d): nasid [%s]", __FUNCTION__, __LINE__, nasid);
+  return kmod_allows("N", nasid);
+}
+
+int
+kmod_coova_nasmac(char *nasmac) {
+  if (_options.debug)
+    syslog(LOG_DEBUG, "%s(%d): nasmac [%s]", __FUNCTION__, __LINE__, nasmac);
+  return kmod_allows("M", nasmac);
+}
+
 int
 kmod_coova_update(struct app_conn_t *appconn) {
   return kmod(appconn->s_state.authenticated ? '+' : '-',
@@ -60,6 +106,14 @@ kmod_coova_release(struct dhcp_conn_t *conn) {
 int
 kmod_coova_clear(void) {
   return kmod('/', 0);
+}
+
+unsigned long int kmod_coova_total_sessions(void) {
+	return totalSessions;
+}
+
+unsigned long int kmod_coova_online_sessions(void) {
+	return onlineSessions;
 }
 
 int
@@ -78,6 +132,9 @@ kmod_coova_sync(void) {
   unsigned long long int pin;
   unsigned long long int pout;
   struct dhcp_conn_t *conn;
+
+  unsigned long int total = 0;
+  unsigned long int online = 0;
 
   if (!_options.kname) return -1;
 
@@ -102,6 +159,9 @@ kmod_coova_sync(void) {
          ip, &state, &bin, &bout, &pin, &pout) == 12) {
       uint8_t mac[6];
       int i;
+
+      total++;
+      if ( 1 == state ) online++;
 
       for (i=0;i<6;i++)
         mac[i]=maci[i]&0xFF;
@@ -162,6 +222,9 @@ kmod_coova_sync(void) {
     free(line);
 
   fclose(fp);
+
+  totalSessions = total;
+  onlineSessions = online;
 
   return 0;
 }
