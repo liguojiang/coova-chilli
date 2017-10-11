@@ -23,7 +23,7 @@ suid_programs =
 libchilli_la_SOURCES = \
 chilli.c tun.c ippool.c radius.c md5.c redir.c dhcp.c \
 iphash.c lookup.c system.h util.c options.c statusfile.c conn.c sig.c \
-garden.c dns.c session.c pkt.c chksum.c net.c safe.c
+garden.c dns.c session.c pkt.c chksum.c net.c safe.c snmp.c
 
 AM_CFLAGS = -D_GNU_SOURCE -Wall -Werror -fno-builtin -fno-strict-aliasing \
   -fomit-frame-pointer -funroll-loops -pipe -I$(top_builddir)/bstring \
@@ -39,7 +39,7 @@ chilli_query_SOURCES = main-query.c
 chilli_opt_SOURCES = main-opt.c 
 
 libchilli_la_LIBADD = $(top_builddir)/bstring/libbstring.la 
-LDADD = libchilli.la ${LIBRT} $(top_builddir)/bstring/libbstring.la ${LIBJSON}
+LDADD = libchilli.la ${LIBRT} $(top_builddir)/bstring/libbstring.la ${LIBJSON} -lnetsnmpagent -lpthread
 
 if WITH_MINICONFIG
 chilli_opt_SOURCES += cmdline.mini.c
