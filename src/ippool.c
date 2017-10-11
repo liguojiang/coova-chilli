@@ -452,8 +452,9 @@ int ippool_newip(struct ippool_t *this,
   struct ippoolm_t *p2 = NULL;
   uint32_t hash;
 
-  syslog(LOG_DEBUG, "Requesting new %s ip: %s",
-         statip ? "static" : "dynamic", inet_ntoa(*addr));
+  if (_options.debug)
+  	syslog(LOG_DEBUG, "Requesting new %s ip: %s",
+         	statip ? "static" : "dynamic", inet_ntoa(*addr));
 
   /* If static:
    *   Look in dynaddr.
@@ -511,8 +512,9 @@ int ippool_newip(struct ippool_t *this,
 #ifdef ENABLE_UAMANYIP
   /* if anyip is set and statip return the same ip */
   if (statip && _options.uamanyip && p2 && p2->is_static) {
-    syslog(LOG_DEBUG, "Found already allocated static ip %s",
-           inet_ntoa(p2->addr));
+  	if (_options.debug)
+    		syslog(LOG_DEBUG, "Found already allocated static ip %s",
+           		inet_ntoa(p2->addr));
     *member = p2;
     return 0;
   }
@@ -619,7 +621,8 @@ int ippool_newip(struct ippool_t *this,
 
     *member = p2;
 
-    syslog(LOG_DEBUG, "Assigned a static ip to: %s", inet_ntoa(*addr));
+    if (_options.debug)
+    	syslog(LOG_DEBUG, "Assigned a static ip to: %s", inet_ntoa(*addr));
 
     ippool_hashadd(this, *member);
 
