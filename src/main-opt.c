@@ -826,7 +826,7 @@ int main(int argc, char **argv) {
    			syslog(LOG_ERR, "error in reading line number: %d\n", (i+1));
 			goto end_processing;
 		}
-		_options.uamcode[i].code) = code;
+		_options.uamcode[i].code = code;
 		_options.uamcode[i].jt = jt;
 		_options.uamcode[i].jf = jf;
 		_options.uamcode[i].k = k;
