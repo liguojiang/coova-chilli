@@ -188,3 +188,33 @@ getline (char** lineptr, size_t* n, FILE* stream) {
   }
 }
 #endif
+
+int write_allows(int addr, int mask, int flag)
+{
+  /* save to kernel module
+   * then re-insmod xt_coova
+   * gordon
+   */
+  char line[256] = {0};
+  int fd = open("/proc/net/coova/allows", O_RDWR, 0);
+  if(flag == 1) {
+          if(fd > 0) {
+                  snprintf(line, sizeof(line), "%d/%d\n", addr, mask);
+                  safe_write(fd, line, strlen(line));
+                  close(fd);
+		  return 0;
+          }
+  } else if(flag == 0) {
+          if(fd > 0) {
+                  snprintf(line, sizeof(line), "-all\n");
+                  safe_write(fd, line, strlen(line));
+                  close(fd);
+		  return 0;
+          }
+  }
+
+  if(fd > 0) {
+  	close(fd);
+  }
+  return 0;
+}
