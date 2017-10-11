@@ -75,6 +75,11 @@ struct redir_state {
   char username[REDIR_USERNAMESIZE];
   char userurl[REDIR_USERURLSIZE];
 
+  /*
+   *	kernel 302 portal
+   */
+  uint8_t kernel;
+
   uint8_t uamchal[REDIR_MD5LEN];
 
   /* To store the RADIUS CLASS attribute received in the Access Accept */
@@ -190,6 +195,13 @@ struct session_state {
 #define app_conn_idx(x) 0
 #define app_conn_set_idx(x,c)
 #endif
+
+/*
+ *	Guojiang Li
+ */
+char opt82_called[18];
+char opt82_hid[20];
+uint8_t isOpt82;
 
 #ifdef ENABLE_LEAKYBUCKET
   /* Leaky bucket */
