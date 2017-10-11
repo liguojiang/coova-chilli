@@ -437,6 +437,11 @@ int pass_through_add(pass_through *ptlist, uint32_t ptlen,
     }
   }
 
+  /* save to kernel module
+   * gordon
+   */
+  write_allows((pt->host).s_addr, (pt->mask).s_addr, 1);
+
   if (cnt == ptlen) {
     if (!is_dyn) {
       if (_options.debug)
