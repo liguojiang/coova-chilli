@@ -72,7 +72,11 @@ void radius_addcalledstation(struct radius_t *this,
              this->nas_hwaddr[3], this->nas_hwaddr[4], this->nas_hwaddr[5]);
   }
 
-  radius_addattr(this, pack, RADIUS_ATTR_CALLED_STATION_ID, 0, 0, 0, mac, strlen((char*)mac));
+  if ( NULL != state && 1 == state->isOpt82 ) {
+  	radius_addattr(this, pack, RADIUS_ATTR_CALLED_STATION_ID, 0, 0, 0, (uint8_t *)state->opt82_called, strlen((char*)state->opt82_called));
+  } else {
+  	radius_addattr(this, pack, RADIUS_ATTR_CALLED_STATION_ID, 0, 0, 0, mac, strlen((char*)mac));
+  }
 }
 
 int radius_printqueue(int fd, struct radius_t *this) {
@@ -663,12 +667,21 @@ int radius_timeout(struct radius_t *this) {
   if (this->first != -1 &&
       radius_cmptv(&now, &this->queue[this->first].timeout) >= 0) {
 
-    if (this->queue[this->first].retrans < _options.radiusretry) {
+    if (this->queue[this->first].retrans <= _options.radiusretry) {
 
       memset(&addr, 0, sizeof(addr));
       addr.sin_family = AF_INET;
 
-      if (this->queue[this->first].retrans == (_options.radiusretrysec - 1)) {
+      if (this->queue[this->first].retrans == _options.radiusretry) {
+	  /*
+	   *	FIXME
+	   *	Guojiang Li
+	   *	For Bypass
+	   */
+	  addr.sin_addr = this->hisaddr_lo;
+	  this->queue[this->first].lastsent = 0;
+      }	
+      else if (this->queue[this->first].retrans == (_options.radiusretrysec - 1)) {
 	/* Use the other server for next retransmission */
 	if (this->queue[this->first].lastsent) {
 	  addr.sin_addr = this->hisaddr0;
@@ -1413,14 +1426,16 @@ void radius_set(struct radius_t *this, unsigned char *hwaddr, int debug) {
 
   /* Remote radius server parameters */
   if (_options.radsec) {
-    inet_aton("127.0.0.1", &this->hisaddr0);
-    this->hisaddr1.s_addr = this->hisaddr0.s_addr;
+    inet_aton("127.0.0.1", &this->hisaddr_lo);
+    this->hisaddr0.s_addr = this->hisaddr_lo.s_addr;
+    this->hisaddr1.s_addr = this->hisaddr_lo.s_addr;
 
     this->secretlen = 6;
     strlcpy(this->secret, "radsec", sizeof(this->secret));
   } else {
     this->hisaddr0.s_addr = _options.radiusserver1.s_addr;
     this->hisaddr1.s_addr = _options.radiusserver2.s_addr;
+    inet_aton("127.0.0.1", &this->hisaddr_lo);
 
     if ((this->secretlen = strlen(_options.radiussecret)) > RADIUS_SECRETSIZE) {
       syslog(LOG_ERR, "Radius secret too long. Truncating to %d characters",
@@ -1519,7 +1534,9 @@ int radius_pkt_send(struct radius_t *this,
 
   if (sendto(this->fd, pack, len, 0,(struct sockaddr *) peer,
        sizeof(struct sockaddr_in)) < 0) {
+#if(_debug_ > 1)
     syslog(LOG_ERR, "%s: sendto() failed!", strerror(errno));
+#endif
     return -1;
   }
 
@@ -1941,7 +1958,8 @@ int radius_decaps(struct radius_t *this, int idx) {
     default:
       /* Check that reply is from correct address */
       if ((addr.sin_addr.s_addr != this->hisaddr0.s_addr) &&
-          (addr.sin_addr.s_addr != this->hisaddr1.s_addr)) {
+          (addr.sin_addr.s_addr != this->hisaddr1.s_addr) &&
+          (addr.sin_addr.s_addr != this->hisaddr_lo.s_addr)) {
         syslog(LOG_WARNING, "Received radius reply from wrong address %s!",
 	       inet_ntoa(addr.sin_addr));
         return -1;
