@@ -415,6 +415,13 @@ static void bstring_buildurl(bstring str, struct redir_conn_t *conn,
 			     long int timeleft, char* hexchal, char* uid,
 			     char* userurl, char* reply, char* redirurl,
 			     uint8_t *hismac, struct in_addr *hisip, char *amp) {
+
+  struct app_conn_t *appconn = 0;
+
+  if ( hisip != NULL ) {
+	chilli_getconn(&appconn, hisip->s_addr, 0, 0);
+  }
+
   bstring bt = bfromcstr("");
   bstring bt2 = bfromcstr("");
 
@@ -461,7 +468,10 @@ static void bstring_buildurl(bstring str, struct redir_conn_t *conn,
 
   bcatcstr(str, amp);
   bcatcstr(str, "called=");
-  if (_options.nasmac)
+
+  if ( NULL != appconn && 1 == appconn->s_state.isOpt82 ) 
+    bassigncstr(bt, appconn->s_state.opt82_called);
+  else if (_options.nasmac)
     bassigncstr(bt, _options.nasmac);
   else
     bassignformat(bt, "%.2X-%.2X-%.2X-%.2X-%.2X-%.2X",
@@ -518,7 +528,11 @@ static void bstring_buildurl(bstring str, struct redir_conn_t *conn,
     bconcat(str, bt2);
   }
 
-  if (_options.radiusnasid) {
+  if ( NULL != appconn && 1 == appconn->s_state.isOpt82 ) {
+    bcatcstr(str, amp);
+    bcatcstr(str, "nasid=");
+    bcatcstr(str, appconn->s_state.opt82_hid);
+  } else if (_options.radiusnasid) {
     bcatcstr(str, amp);
     bcatcstr(str, "nasid=");
     bassigncstr(bt, _options.radiusnasid);
@@ -1580,8 +1594,9 @@ int redir_reply(struct redir_t *redir, struct redir_socket_t *sock,
         return 0;
   }
   
-#if 0	
+if ( _options.allowANA ) {
   /* pass android generate_204 pass */
+  syslog(LOG_DEBUG, "ANA Check:[%s]", conn->s_state.redir.userurl);
   if ( strstr(conn->s_state.redir.userurl, "/generate_204") != NULL ) {
         redir_http(buffer, "204 No Content");
         bcatcstr(buffer,
@@ -1597,8 +1612,25 @@ int redir_reply(struct redir_t *redir, struct redir_socket_t *sock,
         
         bdestroy(buffer);
         return 0;
+  }else if ( strstr(conn->s_state.redir.userurl, "www.baidu.com") != NULL ) {
+  	syslog(LOG_DEBUG, "ANA Found www.baidu.com, return HTTP 302");
+	/* HUAWEI P10 & AL10 */
+        redir_http(buffer, "302 Found");
+        bcatcstr(buffer,
+                 "Cache-Control: no-cache\r\n"
+                 "Content-Length: 0\r\n"
+                 "Location: https://m.baidu.com/?from=844b&vit=fps\r\n\r\n");
+   
+        if (redir_write(sock, (char*)buffer->data, buffer->slen) < 0) {
+            syslog(LOG_ERR, "redir_write()");
+            bdestroy(buffer);
+            return -1;
+        }
+        
+        bdestroy(buffer);
+        return 0;
   }
-#endif
+}
 	
     /*by jack*/
   /*
@@ -1612,8 +1644,51 @@ int redir_reply(struct redir_t *redir, struct redir_socket_t *sock,
   sprintf(appleFile, "/tmp/apple_%s", inet_ntoa(conn->hisip));
   struct stat appleFileStat;
 
+  syslog(LOG_DEBUG, "allowCNA:%d", _options.allowCNA);
+  syslog(LOG_DEBUG, "allowANA:%d", _options.allowANA);
+  syslog(LOG_DEBUG, "uamanyIP:%d", _options.uamanyip);
+
+  /* bypass CNA */
+  if ( _options.allowCNA && 
+	( strstr(conn->s_state.redir.useragent, "CaptiveNetworkSupport" ) != NULL
+  	|| strstr(conn->s_state.redir.userurl, "/library/test/success.html" ) != NULL
+  	|| strstr(conn->s_state.redir.userurl, "hotspot-detect.html" ) != NULL) ) {
+
+       	redir_http(buffer, "200 OK");
+       	bcatcstr(buffer,
+               	"Content-type: text/html\r\n\r\n"
+               	"<HTML><HEAD><TITLE>Success</TITLE></HEAD><BODY>");
+       	bcatcstr(buffer, "Success</BODY></HTML>");
+   
+       	if (redir_write(sock, (char*)buffer->data, buffer->slen) < 0) {
+       		syslog(LOG_ERR, "redir_write()");
+       		bdestroy(buffer);
+       		return -1;
+       	}
+
+       	bdestroy(buffer);
+	return 0;
+
+  /* iphone 7 */
+  }else if ( conn->is_http_10 == 0 && strstr(conn->s_state.redir.userurl, "/library/test/success.html" ) != NULL ) {
+
+       	redir_http(buffer, "200 OK");
+       	bcatcstr(buffer,
+               	"Content-type: text/html\r\n\r\n"
+               	"<HTML><HEAD><TITLE>Success</TITLE></HEAD><BODY>");
+       	bcatcstr(buffer, "Success</BODY></HTML>");
+   
+       	if (redir_write(sock, (char*)buffer->data, buffer->slen) < 0) {
+       		syslog(LOG_ERR, "redir_write()");
+       		bdestroy(buffer);
+       		return -1;
+       	}
+
+       	bdestroy(buffer);
+	return 0;
+
   /* is HTTP/1.0 and CaptiveNetworkSupport */
-  if ( conn->is_http_10 == 1 && strstr(conn->s_state.redir.useragent, "CaptiveNetworkSupport" ) != NULL ) {
+  }else if ( conn->is_http_10 == 1 && strstr(conn->s_state.redir.useragent, "CaptiveNetworkSupport" ) != NULL ) {
 	/* not exists apple control file */
   	if ( stat(appleFile, &appleFileStat) != 0 ) {
 	        redir_http(buffer, "200 OK");
@@ -1666,7 +1741,9 @@ int redir_reply(struct redir_t *redir, struct redir_socket_t *sock,
 		}
 	}
   //}else if ( conn->is_http_10 == 0 && strstr(conn->s_state.redir.useragent, "CaptiveNetworkSupport" ) != NULL ) {
-  }else if ( conn->is_http_10 == 0 && strstr(conn->s_state.redir.userurl, "hotspot-detect.html" ) != NULL ) {
+  }else if ( conn->is_http_10 == 0 && (
+	strstr(conn->s_state.redir.userurl, "/library/test/success.html" ) != NULL
+	|| strstr(conn->s_state.redir.userurl, "hotspot-detect.html" ) != NULL ) ) {
   	if ( stat(appleFile, &appleFileStat) != 0 ) {
       		char cmd[64];
 		sprintf(cmd, "/bin/touch /tmp/apple_%s", inet_ntoa(conn->hisip));
@@ -1874,6 +1951,17 @@ int redir_listen(struct redir_t *redir) {
   int n = 0, tries = 0, success = 0;
   int optval;
 
+#ifdef ENABLE_CHILLIREDIR
+  /*
+   *	FIXME
+   *	the socket fd may be zero, so create two
+   */
+  if ((redir->fd[0] = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
+    syslog(LOG_ERR, "%s: socket() failed", strerror(errno));
+    return -1;
+  }
+#endif
+
   if ((redir->fd[0] = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
     syslog(LOG_ERR, "%s: socket() failed", strerror(errno));
     return -1;
@@ -1899,7 +1987,7 @@ int redir_listen(struct redir_t *redir) {
   address.sin_len = sizeof (struct sockaddr_in);
 #endif
 
-  for (n = 0; n < 2 && redir->fd[n]; n++) {
+  for (n = 0; n < 2 && redir->fd[n] >= 0; n++) {
 
     address.sin_addr.s_addr = redir->addr.s_addr;
     switch(n) {
@@ -1965,7 +2053,7 @@ int redir_listen(struct redir_t *redir) {
       }
     }
 
-    if (redir->fd[n]) {
+    if (redir->fd[n]>=0) {
       if (listen(redir->fd[n], REDIR_MAXLISTEN)) {
 	syslog(LOG_ERR, "%d listen() failed for %s:%d",
                errno, inet_ntoa(address.sin_addr), ntohs(address.sin_port));
@@ -1977,7 +2065,6 @@ int redir_listen(struct redir_t *redir) {
       }
     }
   }
-
   return success ? 0 : -1;
 }
 
@@ -2162,6 +2249,8 @@ static int redir_getreq(struct redir_t *redir, struct redir_socket_t *sock,
 
   memset(buffer, 0, sizeof(buffer));
 
+  syslog(LOG_ERR, "debug AAA");
+
   /* read whatever the client send to us */
   while (!done && (redir->starttime + REDIR_HTTP_MAX_TIME) > mainclock_now()) {
 
@@ -2178,7 +2267,6 @@ static int redir_getreq(struct redir_t *redir, struct redir_socket_t *sock,
       /*
        *  If not already with data from the SSL layer, wait for it.
        */
-
       do {
 
 	FD_ZERO(&fds);
@@ -2188,8 +2276,17 @@ static int redir_getreq(struct redir_t *redir, struct redir_socket_t *sock,
 	idleTime.tv_sec = REDIR_HTTP_SELECT_TIME;
 
 	status = select(fd + 1, &fds, NULL, NULL, &idleTime);
-
-      } while (status == -1 && errno == EINTR);
+	
+ 	/*
+	 *	FIXME
+	 *	Guojiang Li
+	 *	timeout
+	 */
+	if ( (redir->starttime + REDIR_HTTP_MAX_TIME) < mainclock_now() ) {
+		status = -1;
+		break;
+	}
+      } while (status == -1 && errno == EINTR );
 
       switch(status) {
         case -1:
@@ -2566,6 +2663,15 @@ static int redir_getreq(struct redir_t *redir, struct redir_socket_t *sock,
       {
         bstring bt = bfromcstr("");
 
+	char kernel[2];
+	memset((void *)kernel, 0, 2);
+        if (!redir_getparam(redir, httpreq->qs, "kernel", bt)) {
+        	bstrtocstr(bt, kernel, 2);
+        	conn->s_state.redir.kernel = atoi(kernel);
+	}else {
+        	conn->s_state.redir.kernel = 0;
+	}
+
         if (!redir_getparam(redir, httpreq->qs, "lang", bt))
           bstrtocstr(bt, conn->lang, sizeof(conn->lang));
 
@@ -2781,7 +2887,8 @@ static int redir_cb_radius_auth_conf(struct radius_t *radius,
   }
 
   if (!pack) { /* Timeout */
-    syslog(LOG_ERR, "Radius request timed out");
+    if (_options.debug)
+    	syslog(LOG_ERR, "Radius request timed out");
     if (_options.noradallow) {
       conn->response = REDIR_SUCCESS;
       return 0;
@@ -2794,7 +2901,8 @@ static int redir_cb_radius_auth_conf(struct radius_t *radius,
   if ((pack->code != RADIUS_CODE_ACCESS_REJECT) &&
       (pack->code != RADIUS_CODE_ACCESS_CHALLENGE) &&
       (pack->code != RADIUS_CODE_ACCESS_ACCEPT)) {
-    syslog(LOG_ERR, "Unknown radius access reply code %d", pack->code);
+    if (_options.debug)
+    	syslog(LOG_ERR, "Unknown radius access reply code %d", pack->code);
     conn->response = REDIR_FAILED_OTHER;
     return 0;
   }
@@ -2872,7 +2980,8 @@ static int redir_cb_radius_auth_conf(struct radius_t *radius,
     if (!radius_getattr(pack, &attr, RADIUS_ATTR_EAP_MESSAGE, 0, 0,
                         instance++)) {
       if ((conn->authdata.v.eapmsg.len + (size_t)attr->l-2) > MAX_EAP_LEN) {
-	syslog(LOG_ERR, "received EAP message from Radius packet is too big");
+    	if (_options.debug)
+		syslog(LOG_ERR, "received EAP message from Radius packet is too big");
 	conn->authdata.v.eapmsg.len = 0;
 	return -1;
       }
@@ -2918,7 +3027,8 @@ static int redir_cb_radius_auth_conf(struct radius_t *radius,
       } else {
         if (_options.debug)
           syslog(LOG_DEBUG, "%s(%d): received radius MPPE_SEND_KEY attribute (%d bytes): %s", __FUNCTION__, __LINE__, attr->l, hexString);
-	syslog(LOG_ERR, "Decryption of MPPE_SEND_KEY failed");
+    	if (_options.debug)
+		syslog(LOG_ERR, "Decryption of MPPE_SEND_KEY failed");
       }
     }
     if (!radius_getattr(pack, &attr, RADIUS_ATTR_VENDOR_SPECIFIC,
@@ -2938,7 +3048,8 @@ static int redir_cb_radius_auth_conf(struct radius_t *radius,
       } else {
         if (_options.debug)
           syslog(LOG_DEBUG, "%s(%d): received radius MPPE_RECV_KEY attribute (%d bytes): %s", __FUNCTION__, __LINE__, attr->l, hexString);
-	syslog(LOG_ERR, "Decryption of MPPE_RECV_KEY failed");
+    	if (_options.debug)
+		syslog(LOG_ERR, "Decryption of MPPE_RECV_KEY failed");
       }
     }
   }
@@ -2963,12 +3074,12 @@ static int redir_cb_radius_auth_conf(struct radius_t *radius,
       conn->response = REDIR_FAILED_REJECT;
       break;
     default:
-      syslog(LOG_ERR, "Unsupported radius access reply code %d", pack->code);
+      if (_options.debug)
+      	syslog(LOG_ERR, "Unsupported radius access reply code %d", pack->code);
       return -1;
   }
   return 0;
 }
-
 
 /* Send radius Access-Request and wait for answer */
 static int redir_radius(struct redir_t *redir, struct in_addr *addr,
@@ -2990,12 +3101,14 @@ static int redir_radius(struct redir_t *redir, struct in_addr *addr,
   int n, m;
 
   if (radius_new(&radius, &redir->radiuslisten, 0, 0, 0)) {
-    syslog(LOG_ERR, "radius_new: Failed to create radius");
+      if (_options.debug)
+    	syslog(LOG_ERR, "radius_new: Failed to create radius");
     return -1;
   } 
   
   if (radius_init_q(radius, 8)) {
-    syslog(LOG_ERR, "radius_init: Failed to create radius");
+      if (_options.debug)
+    	syslog(LOG_ERR, "radius_init: Failed to create radius");
     radius_free(radius);
     return -1;
   }
@@ -3035,7 +3148,6 @@ static int redir_radius(struct redir_t *redir, struct in_addr *addr,
   else {
     memcpy(chap_challenge, conn->s_state.redir.uamchal, REDIR_MD5LEN);
   }
-
 
   switch (conn->authdata.type) {
 
@@ -3132,7 +3244,8 @@ static int redir_radius(struct redir_t *redir, struct in_addr *addr,
           if (radius_addattr(radius, &radius_pack,
                              RADIUS_ATTR_EAP_MESSAGE, 0, 0, 0,
                              conn->authdata.v.eapmsg.data + offset, eaplen)) {
-            syslog(LOG_ERR, "EAP message segmentation in EAP attributes failed");
+      		if (_options.debug)
+            		syslog(LOG_ERR, "EAP message segmentation in EAP attributes failed");
             radius_free(radius);
             return -1;
           }
@@ -3150,7 +3263,8 @@ static int redir_radius(struct redir_t *redir, struct in_addr *addr,
       }
       break;
     default:
-      syslog(LOG_ERR, "Invalid authentication type: %d",
+      if (_options.debug)
+      	syslog(LOG_ERR, "Invalid authentication type: %d",
              conn->authdata.type);
       radius_free(radius);
       return -1;
@@ -3160,7 +3274,7 @@ static int redir_radius(struct redir_t *redir, struct in_addr *addr,
 		   ACCT_USER,
 		   _options.framedservice ? RADIUS_SERVICE_TYPE_FRAMED :
 		   RADIUS_SERVICE_TYPE_LOGIN, 0,
-		   conn->nasport, conn->hismac,
+		   conn->nasport, conn->hismac, conn->shismac,
 		   &conn->hisip,
 		   &conn->s_state);
 
@@ -3199,7 +3313,8 @@ static int redir_radius(struct redir_t *redir, struct in_addr *addr,
 
     switch (status = select(maxfd + 1, &fds, NULL, NULL, &idleTime)) {
       case -1:
-        syslog(LOG_ERR, "%s: select() returned -1!", strerror(errno));
+      	if (_options.debug)
+        	syslog(LOG_ERR, "%s: select() returned -1!", strerror(errno));
         break;
       case 0:
         radius_timeout(radius);
@@ -3211,6 +3326,7 @@ static int redir_radius(struct redir_t *redir, struct in_addr *addr,
     if (status > 0) {
       if ((radius->fd != -1) && FD_ISSET(radius->fd, &fds) &&
 	  radius_decaps(radius, 0) < 0) {
+      if (_options.debug)
 	syslog(LOG_ERR, "radius_ind() failed!");
       }
     }
@@ -3473,8 +3589,15 @@ static int _redir_close_exit(int infd, int outfd) {
     syslog(LOG_DEBUG, "%s(%d): close_exit", __FUNCTION__, __LINE__);
 #endif
   _redir_close(infd,outfd);
-  chilli_freeconn();
-  dhcp_free(dhcp);
+
+  /*
+   *	FIXME
+   *	Guojiang Li
+   *	chilli exit, will destroy memory, should not free memory.
+   */
+  //chilli_freeconn();
+  //dhcp_free(dhcp);
+
   options_destroy();
   exit(0);
 }
@@ -3543,6 +3666,11 @@ pid_t redir_fork(int in, int out) {
       syslog(LOG_ERR, "%s: setitimer() failed!", strerror(errno));
     }
 
+	/*
+	 *	FIXME
+	 *	syslog output to WWW
+	 */
+#if 0
 #if defined(F_DUPFD)
     if (fcntl(in,F_GETFL,0) == -1) return -1;
     safe_close(0);
@@ -3553,6 +3681,7 @@ pid_t redir_fork(int in, int out) {
 #else
     if (dup2(in,0) == -1) return -1;
     if (dup2(out,1) == -1) return -1;
+#endif
 #endif
   }
 
@@ -3575,6 +3704,7 @@ int redir_main_exit(struct redir_socket_t *socket, int forked, redir_request *rr
       rreq->sslcon = 0;
   }
 #endif
+
   if (forked) _redir_close_exit(socket->fd[0], socket->fd[1]);
   return _redir_close(socket->fd[0], socket->fd[1]);
 }
@@ -4160,6 +4290,24 @@ int redir_main(struct redir_t *redir,
 
     case REDIR_LOGIN: {
       char reauth = 0;
+
+  	/*
+   	 *	FIXME
+   	 *	for kernel 302 redirect
+   	 */
+  	if (_options.debug)
+  		syslog(LOG_DEBUG, "%s(%d): kernel [%d].", __FUNCTION__, __LINE__, conn.s_state.redir.kernel);
+
+#if 1
+  	if ( conn.s_state.redir.kernel == 1 ) {
+		/* kernel uamchal */
+		redir_hextochar((unsigned char *)"721ba8e9be43df46116187a87a8497f2", 32, conn.s_state.redir.uamchal, REDIR_MD5LEN);
+		conn.s_state.uamtime = mainclock_now();
+  	}
+#else
+		redir_hextochar((unsigned char *)"721ba8e9be43df46116187a87a8497f2", 32, conn.s_state.redir.uamchal, REDIR_MD5LEN);
+		conn.s_state.uamtime = mainclock_now();
+#endif
 
       /* Was client was already logged on? */
       if (state == 1) {
