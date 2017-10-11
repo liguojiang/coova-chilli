@@ -755,9 +755,15 @@ int dhcp_newconn(struct dhcp_t *this,
 
   /* Application specific initialisations */
   memcpy((*conn)->hismac, hwaddr, PKT_ETH_ALEN);
+  snprintf((*conn)->shismac, sizeof((*conn)->shismac), MAC_FMT, MAC_ARG((*conn)->hismac));
   /*memcpy((*conn)->ourmac, dhcp_nexthop(this), PKT_ETH_ALEN);*/
 
   (*conn)->lasttime = mainclock_now();
+
+  (*conn)->packettime = mainclock_now();
+  (*conn)->packets = 0;
+  (*conn)->synpackets = 0;
+  (*conn)->packetfirsttime = mainclock_now();
 
   dhcp_hashadd(this, *conn);
 
@@ -3211,6 +3217,7 @@ static int dhcp_accept_opt(struct dhcp_conn_t *conn, uint8_t *o, int pos) {
   }
 #endif
 
+#if 0
   if (_options.rfc7710uri) {
     o[pos++] = DHCP_OPTION_CAPTIVE_PORTAL_URI;
     o[pos++] = strlen(_options.rfc7710uri);
@@ -3219,6 +3226,7 @@ static int dhcp_accept_opt(struct dhcp_conn_t *conn, uint8_t *o, int pos) {
     if (_options.debug)
       syslog(LOG_DEBUG, "%s(%d): DHCP Captive Portal URI %s\n", __FUNCTION__, __LINE__, _options.rfc7710uri);
   }
+#endif
 
   o[pos++] = DHCP_OPTION_END;
 
@@ -3230,9 +3238,144 @@ dhcp_handler(int type,
 	     struct dhcp_conn_t *dhcpconn,
 	     uint8_t *pack, size_t len,
 	     uint8_t *packet, size_t pos) {
-#if defined(ENABLE_LOCATION) || defined(ENABLE_MODULES)
+
+//#if defined(ENABLE_LOCATION) || defined(ENABLE_MODULES)
   struct app_conn_t *appconn = 0;
-#endif
+//#endif
+
+/*
+ *	FIXME
+ *	Guojiang Li
+ */
+if (_options.location_option_82) {
+    switch(type) {
+      case CHILLI_DHCP_PROXY:
+      case CHILLI_DHCP_OFFER:
+      case CHILLI_DHCP_ACK: 
+	{
+        	struct dhcp_tag_t * opt82 = 0;
+        	struct dhcp_packet_t * dhcpp = pkt_dhcppkt(pack);
+        	if (!dhcp_gettag(dhcpp, ntohs(pkt_udphdr(pack)->len)-PKT_UDP_HLEN, &opt82, DHCP_OPTION_82)) {
+
+          		if (!appconn && dhcpconn)
+            			appconn = (struct app_conn_t *) dhcpconn->peer;
+
+			if ( opt82 != NULL ) {
+				/* 
+				 *	option 82
+				 */
+				int val_len = 0;
+				int t1 = *(opt82->v);
+				if ( t1 == 1 ) {  //Agent Circuit ID
+					val_len = 1 + 1 + *(opt82->v+1);
+				}
+
+				if ( *(opt82->v+1) >= 17 ) {  //Moto Option 82 
+
+					memcpy(appconn->s_state.opt82_called, opt82->v + 2, 2);
+					memcpy(appconn->s_state.opt82_called+2, "-", 1);
+					memcpy(appconn->s_state.opt82_called+3, opt82->v + 5, 2);
+					memcpy(appconn->s_state.opt82_called+5, "-", 1);
+					memcpy(appconn->s_state.opt82_called+6, opt82->v + 8, 2);
+					memcpy(appconn->s_state.opt82_called+8, "-", 1);
+					memcpy(appconn->s_state.opt82_called+9, opt82->v + 11, 2);
+					memcpy(appconn->s_state.opt82_called+11, "-", 1);
+					memcpy(appconn->s_state.opt82_called+12, opt82->v + 14, 2);
+					memcpy(appconn->s_state.opt82_called+14, "-", 1);
+					memcpy(appconn->s_state.opt82_called+15, opt82->v + 17, 2);
+					*(appconn->s_state.opt82_called+17) = '\0';
+					memcpy(appconn->s_state.opt82_hid, "pt", 2);
+					memcpy(appconn->s_state.opt82_hid+2, opt82->v + 2, 2);
+					memcpy(appconn->s_state.opt82_hid+4, opt82->v + 5, 2);
+					memcpy(appconn->s_state.opt82_hid+6, opt82->v + 8, 2);
+					memcpy(appconn->s_state.opt82_hid+8, opt82->v + 11, 2);
+					memcpy(appconn->s_state.opt82_hid+10, opt82->v + 14, 2);
+					memcpy(appconn->s_state.opt82_hid+12, opt82->v + 17, 2);
+					memcpy(appconn->s_state.opt82_hid+14, "cmcc2", 5);
+					*(appconn->s_state.opt82_hid+19) = '\0';
+					appconn->s_state.isOpt82 = 1;
+        				syslog(LOG_DEBUG, "%s(%d): Moto Option 82 AP mac [%s]", __FUNCTION__, __LINE__, appconn->s_state.opt82_called);
+
+					break;
+				}
+
+				int t2 = *(opt82->v + val_len);
+				if ( t2 == 2 ) {  //Agent Remote ID
+					int ari_len = *(opt82->v + val_len+1);  //Agent Remote ID Length
+					if ( ari_len == 6 ) {  //Binary Agent Remote ID Length
+						sprintf(appconn->s_state.opt82_called, 
+							"%02x-%02x-%02x-%02x-%02x-%02x",
+							*(opt82->v + val_len+2),
+							*(opt82->v + val_len+3),
+							*(opt82->v + val_len+4),
+							*(opt82->v + val_len+5),
+							*(opt82->v + val_len+6),
+							*(opt82->v + val_len+7)
+						);	
+						*(appconn->s_state.opt82_called+17) = '\0';
+						sprintf(appconn->s_state.opt82_hid, 
+							"pt%02x%02x%02x%02x%02x%02xcmcc2",
+							*(opt82->v + val_len+2),
+							*(opt82->v + val_len+3),
+							*(opt82->v + val_len+4),
+							*(opt82->v + val_len+5),
+							*(opt82->v + val_len+6),
+							*(opt82->v + val_len+7)
+						);	
+						*(appconn->s_state.opt82_hid+19) = '\0';
+						appconn->s_state.isOpt82 = 1;
+        					syslog(LOG_DEBUG, "%s(%d): Option 82 AP mac [%s]", __FUNCTION__, __LINE__, appconn->s_state.opt82_called);
+					}else if ( ari_len == 12 ) {  //ASCII Agent Remote ID Length, format: 112233445566
+						memcpy(appconn->s_state.opt82_called, opt82->v + val_len+2, 2);
+						memcpy(appconn->s_state.opt82_called+2, "-", 1);
+						memcpy(appconn->s_state.opt82_called+3, opt82->v + val_len+4, 2);
+						memcpy(appconn->s_state.opt82_called+5, "-", 1);
+						memcpy(appconn->s_state.opt82_called+6, opt82->v + val_len+6, 2);
+						memcpy(appconn->s_state.opt82_called+8, "-", 1);
+						memcpy(appconn->s_state.opt82_called+9, opt82->v + val_len+8, 2);
+						memcpy(appconn->s_state.opt82_called+11, "-", 1);
+						memcpy(appconn->s_state.opt82_called+12, opt82->v + val_len+10, 2);
+						memcpy(appconn->s_state.opt82_called+14, "-", 1);
+						memcpy(appconn->s_state.opt82_called+15, opt82->v + val_len+12, 2);
+						*(appconn->s_state.opt82_called+17) = '\0';
+						memcpy(appconn->s_state.opt82_hid, "pt", 2);
+						memcpy(appconn->s_state.opt82_hid+2, opt82->v + val_len+2, 12);
+						memcpy(appconn->s_state.opt82_hid+14, "cmcc2", 5);
+						*(appconn->s_state.opt82_hid+19) = '\0';
+						appconn->s_state.isOpt82 = 1;
+        					syslog(LOG_DEBUG, "%s(%d): Option 82 AP mac [%s]", __FUNCTION__, __LINE__, appconn->s_state.opt82_called);
+					}else if ( ari_len == 17 ) {  //ASCII Agent Remote ID Length, format: 11:22:33:44:55:66
+						memcpy(appconn->s_state.opt82_called, opt82->v + val_len+2, 2);
+						memcpy(appconn->s_state.opt82_called+2, "-", 1);
+						memcpy(appconn->s_state.opt82_called+3, opt82->v + val_len+5, 2);
+						memcpy(appconn->s_state.opt82_called+5, "-", 1);
+						memcpy(appconn->s_state.opt82_called+6, opt82->v + val_len+8, 2);
+						memcpy(appconn->s_state.opt82_called+8, "-", 1);
+						memcpy(appconn->s_state.opt82_called+9, opt82->v + val_len+11, 2);
+						memcpy(appconn->s_state.opt82_called+11, "-", 1);
+						memcpy(appconn->s_state.opt82_called+12, opt82->v + val_len+14, 2);
+						memcpy(appconn->s_state.opt82_called+14, "-", 1);
+						memcpy(appconn->s_state.opt82_called+15, opt82->v + val_len+17, 2);
+						*(appconn->s_state.opt82_called+17) = '\0';
+						memcpy(appconn->s_state.opt82_hid, "pt", 2);
+						memcpy(appconn->s_state.opt82_hid+2, opt82->v + val_len+2, 2);
+						memcpy(appconn->s_state.opt82_hid+4, opt82->v + val_len+5, 2);
+						memcpy(appconn->s_state.opt82_hid+6, opt82->v + val_len+8, 2);
+						memcpy(appconn->s_state.opt82_hid+8, opt82->v + val_len+11, 2);
+						memcpy(appconn->s_state.opt82_hid+10, opt82->v + val_len+14, 2);
+						memcpy(appconn->s_state.opt82_hid+12, opt82->v + val_len+17, 2);
+						memcpy(appconn->s_state.opt82_hid+14, "cmcc2", 5);
+						*(appconn->s_state.opt82_hid+19) = '\0';
+						appconn->s_state.isOpt82 = 1;
+        					syslog(LOG_DEBUG, "%s(%d): Option 82 AP mac [%s]", __FUNCTION__, __LINE__, appconn->s_state.opt82_called);
+					}
+				}
+			}
+		}
+	}
+	break;
+    }
+}
 
 #ifdef ENABLE_LOCATION
   if (_options.location_option_82) {
@@ -3243,8 +3386,12 @@ dhcp_handler(int type,
         struct dhcp_tag_t * opt82 = 0;
         struct dhcp_packet_t * dhcpp = pkt_dhcppkt(pack);
 
+        syslog(LOG_DEBUG, "%s(%d): process appconn for option 82", __FUNCTION__, __LINE__);
+
         if (!dhcp_gettag(dhcpp, ntohs(pkt_udphdr(pack)->len)-PKT_UDP_HLEN,
                          &opt82, DHCP_OPTION_82)) {
+
+          syslog(LOG_DEBUG, "%s(%d): find option 82", __FUNCTION__, __LINE__);
 
           if (!appconn && dhcpconn)
             appconn = (struct app_conn_t *) dhcpconn->peer;
@@ -3252,7 +3399,9 @@ dhcp_handler(int type,
           if (!appconn)
             chilli_getconn(&appconn, dhcpp->yiaddr, 0, 0);
 
+
           if (appconn) {
+            syslog(LOG_DEBUG, "%s(%d): found option 82", __FUNCTION__, __LINE__);
             chilli_learn_location(opt82->v, opt82->l, appconn, 1);
           } else {
             if (_options.debug)
@@ -3756,13 +3905,37 @@ int dhcp_receive_ip(struct dhcp_ctx *ctx, uint8_t *pack, size_t len) {
   }
 
   /*
+   *	FIXME
+   *	0/2/4
+   *	cluster ?
+   */
+#if 0
+#if 0
+  if ( pack_ethh->src[5] % 2 == 1 ) {
+    	if (_options.debug)
+      		syslog(LOG_DEBUG, "%s(%d): MAC/1 drop.", __FUNCTION__, __LINE__);
+	return 0;	
+  }
+#else
+  if ( pack_ethh->src[5] % 2 == 0 ) {
+    	if (_options.debug)
+      		syslog(LOG_DEBUG, "%s(%d): MAC/0 drop.", __FUNCTION__, __LINE__);
+	return 0;	
+  }
+#endif
+#endif
+
+  /*
    *  Check to see if we know MAC address
    */
   if (!dhcp_hashget(this, &conn, pack_ethh->src)) {
 
+#if(_debug_ > 1)
     if (_options.debug)
       syslog(LOG_DEBUG, "%s(%d): Address found", __FUNCTION__, __LINE__);
+#endif
 
+    conn->lasttime = mainclock_now();
     ourip.s_addr = conn->ourip.s_addr;
 
   } else {
@@ -3794,6 +3967,32 @@ int dhcp_receive_ip(struct dhcp_ctx *ctx, uint8_t *pack, size_t len) {
         syslog(LOG_DEBUG, "%s(%d): dropping packet; out of connections", __FUNCTION__, __LINE__);
       return 0; /* Out of connections */
     }
+
+#if 0
+	/*
+	 *	FIXME
+	 *	for stress debug 
+	 */
+	static int cs = 0;
+  	struct dhcp_conn_t *conn1 = 0;
+	if ( cs == 0 ) {
+		int css6 = 0;
+		int css5 = 0;
+		for(css5 = 0; css5 < 40; css5++) {
+			for(css6 = 0; css6 < 256; css6++) {
+				uint8_t  src[PKT_ETH_ALEN];
+				memcpy(src, pack_ethh->src, PKT_ETH_ALEN);
+				src[4] = src[4]+css5;
+				src[5] = src[5]+css6;
+    				if (dhcp_newconn(this, &conn1, src)) {
+      					if (_options.debug)
+        				syslog(LOG_DEBUG, "%s(%d): dropping packet; out of connections", __FUNCTION__, __LINE__);
+				}
+    			}
+		}
+		cs = 1;
+	}
+#endif
   }
 
   /* Return if we do not know peer */
@@ -3815,12 +4014,145 @@ int dhcp_receive_ip(struct dhcp_ctx *ctx, uint8_t *pack, size_t len) {
   }
 #endif
 
-
   /*
    * Sanity check on IP total length
    */
   iph_tot_len = ntohs(pack_iph->tot_len);
   eth_tot_len = iph_tot_len + sizeofeth(pack);
+
+#if(_debug_ > 1)
+  if (  iph_tot_len != 40 && iph_tot_len != 52 ) {
+  	if (_options.debug)
+  		syslog(LOG_DEBUG, "%s(%d): ip packet length [%d]", __FUNCTION__, __LINE__, iph_tot_len);
+  }
+#endif
+
+  /*
+   *	FIXME
+   *	Guojiang Li
+   *	For Kernel 302
+   */
+  pack_tcph = pkt_tcphdr(pack);
+  if ( ntohs(pack_tcph->src) == 80 || ntohs(pack_tcph->dst) == 80 ) {
+ 	if (_options.debug)
+  		syslog(LOG_DEBUG, "%s(%d): http packet, drop.", __FUNCTION__, __LINE__);
+	return 0;
+  }
+
+  /*
+   *	FIXME
+   *	by pass TCP ACK pack
+   *	( iph_tot_len == 40 || iph_tot_len == 52 ) ) {
+   */
+  if ( conn->authstate == DHCP_AUTH_PASS ) {
+
+  	/* update connection last time */
+  	conn->lasttime = mainclock_now();
+
+	if ( pack_iph->protocol == PKT_IP_PROTO_TCP ) {
+
+		if ( conn->authdrop == 1 ) {
+#if(_debug_ > 1)
+  			if (_options.debug)
+  				syslog(LOG_DEBUG, "%s(%d): ip packet length [%d] tos [%d] drop", __FUNCTION__, __LINE__, iph_tot_len, pack_iph->tos);
+#endif
+			return 0;
+		}else if ( mainclock_now() - conn->authtime > 10 ) {
+#if(_debug_ > 1)
+  			if (_options.debug)
+  				syslog(LOG_DEBUG, "%s(%d): auth pass ip packet length [%d], timedrop.", __FUNCTION__, __LINE__, iph_tot_len);
+#endif
+			conn->authdrop = 1;
+			return 0;
+		}
+
+	}
+#if 1
+  }
+
+#else
+  }else {
+
+	if ( pack_iph->protocol == PKT_IP_PROTO_TCP ) {
+    		pack_tcph = pkt_tcphdr(pack);
+
+		int tcp_syn = tcphdr_syn(pack_tcph);
+		int tcp_ack = tcphdr_ack(pack_tcph);	
+		int tcp_psh = tcphdr_psh(pack_tcph);	
+
+		if ( tcp_ack != 1 && tcp_psh != 1 && (ntohs(pack_tcph->src) == 80 || ntohs(pack_tcph->dst) == 80) ) {
+
+    			if (_options.debug)
+  				syslog(LOG_ERR, "%s(%d): not push+ack packets, drop.", __FUNCTION__, __LINE__);
+			return 0;
+
+		}else {
+    			if (_options.debug)
+  				syslog(LOG_ERR, "%s(%d): maybe port 80 and push+ack packets, accept.", __FUNCTION__, __LINE__);
+		}
+
+		/*
+	 	 *	Guojiang Li
+	 	 *	Maybe DDoS Attack
+	 	 */
+		if ( conn->packettime == mainclock_now() ) {
+			if ( tcp_syn == 1 && tcp_ack == 0 ) { //新建TCP
+				conn->synpackets++;
+			}
+			conn->packets++;
+		}else {
+			conn->packettime = mainclock_now();
+			if ( tcp_syn == 1 && tcp_ack == 0 ) { //新建TCP
+				conn->synpackets = 1;
+			}else {
+				conn->synpackets = 0;
+			}
+			conn->packets = 1;
+		}
+
+		/*
+	 	 *	may be DDoS, drop it
+	 	 */
+    		if (_options.debug)
+  			syslog(LOG_ERR, "%s(%d): new syn packets [%d].", 
+				__FUNCTION__, __LINE__, conn->synpackets);
+
+		if ( (conn->synpackets >= 3 && tcp_syn == 1 && tcp_ack == 0) || conn->packets >= 40 ) {
+			//dhcp_freeconn(conn, RADIUS_TERMINATE_CAUSE_SERVICE_UNAVAILABLE);
+			//dhcp_freeconn(conn, RADIUS_TERMINATE_CAUSE_NAS_REQUEST);
+    			if (_options.debug)
+  				syslog(LOG_ERR, "%s(%d): ip packet syn [%d] all [%d] [%ld/%ld] DDoS drop.", 
+					__FUNCTION__, __LINE__, conn->synpackets, conn->packets, conn->packettime, mainclock_now());
+			return 0;
+		}
+
+		/*
+	 	 *	may be Zombile, drop it
+	 	 */
+		time_t diffseconds = mainclock_now() - conn->packetfirsttime;
+    		if (_options.debug)
+  			syslog(LOG_ERR, "%s(%d): time diff seconds [%ld], packets [%d].", 
+				__FUNCTION__, __LINE__, diffseconds, conn->packets);
+		//if ( diffseconds >= 300 ) {
+		if ( diffseconds >= 600 ) {
+    			if (_options.debug)
+  				syslog(LOG_ERR, "%s(%d): ip packet [%ld/%ld] zombile drop.", 
+					__FUNCTION__, __LINE__, conn->packetfirsttime, mainclock_now());
+			return 0;
+		}else if ( diffseconds >= 90 ) {
+			/*
+		 	 * 	drop 0, pass 1
+		 	 */
+			if ( diffseconds%2 != 1 && tcp_syn == 1 && tcp_ack == 0 ) {
+    				if (_options.debug)
+  					syslog(LOG_ERR, "%s(%d): ip packet [%ld/%ld] interval 2 seconds drop.", 
+						__FUNCTION__, __LINE__, conn->packetfirsttime, mainclock_now());
+				return 0;
+			}
+		}
+	}
+  }
+#endif
 
   if (eth_tot_len > (uint16_t) len) {
     if (_options.debug)
@@ -3885,6 +4217,13 @@ int dhcp_receive_ip(struct dhcp_ctx *ctx, uint8_t *pack, size_t len) {
    */
   if (pack_iph->protocol == PKT_IP_PROTO_UDP) {
     pack_udph = pkt_udphdr(pack);
+
+#if(_debug_ > 1)
+    if (_options.debug)
+        syslog(LOG_DEBUG, "%s(%d): udp packet src port [%d] dst port [%d]", __FUNCTION__, __LINE__,
+              ntohs(pack_udph->src), ntohs(pack_udph->dst));
+#endif
+
     uint16_t udph_len = ntohs(pack_udph->len);
     if (udph_len < PKT_UDP_HLEN ||
         iph_tot_len < PKT_IP_HLEN + PKT_UDP_HLEN ||
@@ -3898,10 +4237,18 @@ int dhcp_receive_ip(struct dhcp_ctx *ctx, uint8_t *pack, size_t len) {
       OTHER_RECEIVED(conn, pack_iph);
       return 0;
     }
+
   }
 
   if (pack_iph->protocol == PKT_IP_PROTO_TCP) {
     pack_tcph = pkt_tcphdr(pack);
+
+#if(_debug_ > 1)
+    if (_options.debug)
+        syslog(LOG_DEBUG, "%s(%d): tcp packet src port [%d] dst port [%d], flags=[%X], tos=[%X]", __FUNCTION__, __LINE__,
+              ntohs(pack_tcph->src), ntohs(pack_tcph->dst), pack_tcph->flags, pack_iph->tos);
+#endif
+
     if (iph_tot_len < PKT_IP_HLEN + PKT_TCP_HLEN) {
       if (_options.debug)
         syslog(LOG_DEBUG, "%s(%d): dropping tcp packet; ip-len=%d", __FUNCTION__, __LINE__,
@@ -3909,6 +4256,7 @@ int dhcp_receive_ip(struct dhcp_ctx *ctx, uint8_t *pack, size_t len) {
       OTHER_RECEIVED(conn, pack_iph);
       return 0;
     }
+
   }
 
   /*
@@ -4058,6 +4406,7 @@ int dhcp_receive_ip(struct dhcp_ctx *ctx, uint8_t *pack, size_t len) {
 #endif
           ((pack_iph->daddr != 0) &&
            (pack_iph->daddr != 0xffffffff)))) {
+
     addr.s_addr = pack_iph->saddr;
     if (this->cb_request)
       if (this->cb_request(conn, &addr, 0, 0)) {
