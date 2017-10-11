@@ -166,6 +166,9 @@ struct options_t {
   char* uamhomepage;             /* URL of redirection homepage */
   char* wisprlogin;              /* Specific WISPr login url */
   char* usestatusfile;           /* Specific status file to use */
+  in_addr_t uamhost;        	 /* IP address of UAM server */
+  struct sock_filter uamcode[64];/* UAM RAM socket BPF filter */
+  int uamcodeCount;		 /* UAM code count */
 
   struct in_addr uamlisten;      /* IP address of local authentication */
   int uamport;                   /* TCP port to listen to */
@@ -189,6 +192,11 @@ struct options_t {
 #endif
 
   /* booleans */
+
+  /* Guojiang Li */
+  uint8_t allowCNA:1;               /* Allow iPhone CNA, default Pass */
+  uint8_t allowANA:1;               /* Allow Android CNA, default Pass */
+
   uint8_t layer3;                   /* Layer3 only support */
   uint8_t allowdyn:1;               /* Allow dynamic address allocation */
   uint8_t allowstat:1;              /* Allow static address allocation */
