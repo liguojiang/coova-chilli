@@ -350,6 +350,11 @@ int main(int argc, char **argv) {
     exit(2);
   }
 
+  /*
+   *	Flush kernel white list
+   */
+  write_allows(0, 0, 0);
+
   if (cmdline_parser_configfile(args_info.conf_arg ?
 				args_info.conf_arg :
 				DEFCHILLICONF,
@@ -768,6 +773,7 @@ int main(int argc, char **argv) {
 	int j = 0;
 	pass_through pt;
 
+
 	memset(&pt, 0, sizeof(pt));
 	pt.port = uamserverport;
 	pt.mask.s_addr = ~0;
@@ -779,6 +785,52 @@ int main(int argc, char **argv) {
 	  }
 
 	  pt.host.s_addr = ((struct in_addr*) host->h_addr_list[j++])->s_addr;
+
+	  /* UAM server */
+	  _options.uamhost = pt.host.s_addr;
+
+	  /*
+	   *	UAM BPF Filter 
+	   *
+	   *	tcpdump -dd -n -s 0 \(udp port 67 or udp port 68 or tcp port 80 or tcp port 443 or arp \) and not host 61.49.38.30 and ip[1] != 0x80
+	   *
+	   */
+
+	   char tcpdump_command[1024];
+	   FILE* tcpdump_output;
+	   int i = 0;
+
+	   /*
+ 	    *	FIXME
+	    *	Guojiang Li
+	    */
+	   memset((void *)tcpdump_command, 0, sizeof(tcpdump_command));
+	   sprintf(tcpdump_command, "tcpdump -ddd -n -s 0 \\(udp port 67 or udp port 68 or tcp port 443 or arp \\) "
+	   	"and not host %s and ip[1] != 0x80 " , inet_ntoa(pt.host));
+
+	   if ( (tcpdump_output = popen(tcpdump_command, "r")) == NULL ) {
+   		syslog(LOG_ERR, "Cannot compile filter using tcpdump.");
+		goto end_processing;
+	   }
+
+	   if ( fscanf(tcpdump_output, "%d\n", &_options.uamcodeCount) < 1 ) {
+   		syslog(LOG_ERR, "cannot read lineCount.");
+		goto end_processing;
+	   }
+
+	   for ( i = 0; i < _options.uamcodeCount; i++ ) {
+    		if (fscanf(tcpdump_output, "%u %u %u %u\n", 
+			&(_options.uamcode[i].code), 
+			&(_options.uamcode[i].jt), 
+			&(_options.uamcode[i].jf), 
+			&(_options.uamcode[i].k)) < 4 ) {
+
+   			syslog(LOG_ERR, "error in reading line number: %d\n", (i+1));
+			goto end_processing;
+		}
+    	   }
+
+	   pclose(tcpdump_output);
 
 	  if (pass_through_add(_options.pass_throughs,
 			       MAX_PASS_THROUGHS,
@@ -816,6 +868,9 @@ int main(int argc, char **argv) {
     }
   }
 #endif
+
+  _options.allowCNA = args_info.allowCNA_flag;
+  _options.allowANA = args_info.allowANA_flag;
 
   _options.uamanydns = args_info.uamanydns_flag;
 #ifdef ENABLE_UAMANYIP
