@@ -42,14 +42,23 @@ MODULE_LICENSE("GPL");
 MODULE_ALIAS("ipt_coova");
 MODULE_ALIAS("ip6t_coova");
 
-static unsigned int ip_list_tot = 2048;
+#define MAX_WEBSITE_LEN 128
+
+static unsigned int ip_list_tot = 65536;
 static unsigned int ip_pkt_list_tot = 20;
-//static unsigned int ip_list_tot = 100;
+//static unsigned int ip_list_tot = 5;
 //static unsigned int ip_pkt_list_tot = 20;
 static unsigned int ip_list_hash_size = 0;
 static unsigned int ip_list_perms = 0644;
 static unsigned int ip_list_uid = 0;
 static unsigned int ip_list_gid = 0;
+static char kuamserver[1024];
+static unsigned int uamserverlen = 0;
+static unsigned int uamhostlen = 0;
+static char uamserver[1024];
+static char uamhost[16];
+static char nasid[32];
+static char nasmac[32];
 module_param(ip_list_tot, uint, 0400);
 module_param(ip_pkt_list_tot, uint, 0400);
 module_param(ip_list_hash_size, uint, 0400);
@@ -63,6 +72,13 @@ MODULE_PARM_DESC(ip_list_perms, "permissions on /proc/net/coova/* files");
 MODULE_PARM_DESC(ip_list_uid,"owner of /proc/net/coova/* files");
 MODULE_PARM_DESC(ip_list_gid,"owning group of /proc/net/coova/* files");
 
+struct allows_entry {
+        struct list_head        list;
+        int32_t                 addr;
+        int32_t                 mask;
+        u_int8_t                status;
+};
+
 struct coova_entry {
 	struct list_head	list;
 	struct list_head	lru_list;
@@ -70,6 +86,7 @@ struct coova_entry {
 	unsigned char           hwaddr[ETH_ALEN];
 	u_int16_t		family;
 	u_int8_t		index;
+	unsigned long		firstTime;
 
 	u_int8_t                state;
 	u_int64_t		bytes_in;
@@ -88,14 +105,18 @@ struct coova_table {
 };
 
 static LIST_HEAD(tables);
+static LIST_HEAD(allows);
 static DEFINE_SPINLOCK(coova_lock);
+static DEFINE_SPINLOCK(allows_lock);
 static DEFINE_MUTEX(coova_mutex);
 
 #ifdef CONFIG_PROC_FS
 static struct proc_dir_entry *coova_proc_dir;
-static const struct file_operations coova_old_fops, coova_mt_fops;
+static struct proc_dir_entry *allow_proc_dir;
+static const struct file_operations coova_mt_fops, allows_fops;
 #endif
 
+static u_int32_t wNums = 0;
 static u_int32_t hash_rnd;
 static bool hash_rnd_initted;
 
@@ -126,16 +147,34 @@ coova_entry_lookup(const struct coova_table *table,
 	struct coova_entry *e;
 	unsigned int h;
 
-	if (family == AF_INET6)
+	if (family == AF_INET6) {
 		h = coova_entry_hash6(addrp);
-	else
+	} else {
 		h = coova_entry_hash4(addrp);
+	}
 
-	list_for_each_entry(e, &table->iphash[h], list)
+	list_for_each_entry(e, &table->iphash[h], list) {
 		if (e->family == family &&
 		    memcmp(&e->addr, addrp, sizeof(e->addr)) == 0)
 			return e;
+	}
 	return NULL;
+}
+
+static struct allows_entry *
+allows_entry_lookup(const u_int32_t addrp)
+{
+        struct allows_entry *t;
+	int i = 0;
+
+        list_for_each_entry(t, &allows, list) {
+		i++;
+		//printk(KERN_DEBUG "xt_coova: allow check [%d]/[%d].", wNums, i);
+                if((addrp&(t->mask)) == ((t->addr)&(t->mask))) {
+                	return t;
+                }
+        }
+        return NULL;
 }
 
 static void coova_entry_remove(struct coova_table *t, struct coova_entry *e)
@@ -144,6 +183,12 @@ static void coova_entry_remove(struct coova_table *t, struct coova_entry *e)
 	list_del(&e->lru_list);
 	kfree(e);
 	t->entries--;
+}
+
+static void allow_entry_remove(struct allows_entry *e)
+{
+        list_del(&(e->list));
+        kfree(e);
 }
 
 static void coova_entry_reset(struct coova_entry *e)
@@ -159,11 +204,24 @@ static struct coova_entry *
 coova_entry_init(struct coova_table *t, const union nf_inet_addr *addr,
 		 u_int16_t family)
 {
-	struct coova_entry *e;
+	struct coova_entry *e, *next;
+	unsigned int i;
 
 	if (t->entries >= ip_list_tot) {
+
+#if 0
 		e = list_entry(t->lru_list.next, struct coova_entry, lru_list);
 		coova_entry_remove(t, e);
+#else
+		for (i = 0; i < ip_list_hash_size; i++) {
+			list_for_each_entry_safe(e, next, &t->iphash[i], list) {
+				if ( 0 == e->state ) {
+					coova_entry_remove(t, e);
+					break;
+				}
+			}
+		}
+#endif
 	}
 
 	e = kmalloc(sizeof(*e), GFP_ATOMIC);
@@ -202,6 +260,30 @@ static struct coova_table *coova_table_lookup(const char *name)
 	return NULL;
 }
 
+static void allows_empty(void)
+{
+        struct allows_entry *e, *next;
+        list_for_each_entry_safe(e, next, &allows, list)
+        {
+                        e->status = 0;
+        }
+}
+
+static void allows_empty_del(void)
+{
+        struct allows_entry *e, *next;
+        list_for_each_entry_safe(e, next, &allows, list)
+                //if(  e->status == 0 )
+                        allow_entry_remove(e);
+}
+
+static void allows_flush(void)
+{
+        struct allows_entry *e, *next;
+        list_for_each_entry_safe(e, next, &allows, list)
+                        allow_entry_remove(e);
+}
+
 static void coova_table_flush(struct coova_table *t)
 {
 	struct coova_entry *e, *next;
@@ -212,35 +294,413 @@ static void coova_table_flush(struct coova_table *t)
 			coova_entry_remove(t, e);
 }
 
+static void rebuild_checksum(struct sk_buff* skb, struct iphdr *iph, struct tcphdr *tcph)
+{
+	unsigned  int ntcp_hdr_off;
+    	ntcp_hdr_off = tcph->doff << 2;
+	
+	iph->check = 0;
+	iph->check = ip_fast_csum((unsigned char *)iph, iph->ihl);
+		
+	skb->csum = 0;
+	skb->csum = csum_partial((unsigned char *)((unsigned char *)tcph + ntcp_hdr_off), ntohs(iph->tot_len) - (iph->ihl << 2) - ntcp_hdr_off, 0);
+	
+	tcph->check = 0;
+	tcph->check = csum_tcpudp_magic(iph->saddr, iph->daddr,
+					ntohs(iph->tot_len) - (iph->ihl << 2), iph->protocol, 
+					csum_partial((unsigned char *)tcph, ntcp_hdr_off, skb->csum));
+				
+	skb->ip_summed = CHECKSUM_NONE;
+}
+
+static int build_new_skb(struct sk_buff* old_skb,struct iphdr *old_iph,struct tcphdr *old_tcph,int old_length,char* new_website)
+{
+    unsigned char* mach;
+	struct iphdr *iph;
+	struct tcphdr *tcph;
+	struct sk_buff * new_skb;
+	char *p;
+	char *base_data = "HTTP/1.1 302 Found\r\nLocation: ";
+	static char data[MAX_WEBSITE_LEN*4+1024+1+38]; //static char data[MAX_WEBSITE_LEN+strlen(base_data)+5];
+	int i;
+        int tcplen;
+	int length ;
+	static int identify = 0;
+
+	p = data;
+	memcpy(p,(void*)base_data,strlen(base_data));
+	p = p + strlen(base_data);
+	memcpy(p, new_website, strlen(new_website));
+	p = p + strlen(new_website);
+	*p = '\r';
+	p++;
+	*p = '\n';
+	p++;
+	*p = '\r';
+	p++;
+	*p = '\n';
+	p++;	
+	*p = 0;
+	
+	//printk("http data = %s\n",data);
+	tcplen = strlen(data);
+	length = tcplen + sizeof(struct iphdr) + sizeof(struct tcphdr);
+
+	identify++;
+	
+	new_skb = dev_alloc_skb(length+16);
+	if(!new_skb){
+		printk("low memory.../n");
+		return -1;
+	}
+
+	skb_reserve(new_skb,length+16);
+	memcpy(skb_push(new_skb,tcplen),data,tcplen);
+    	tcph = (struct tcphdr *)skb_push(new_skb,sizeof(struct tcphdr));
+#if LINUX_VERSION_CODE>= KERNEL_VERSION(2,6,30)
+	skb_reset_transport_header(new_skb);
+	tcph = tcp_hdr(new_skb);
+#else
+        new_skb->h.th = tcph;
+
+#endif		
+	iph = (struct iphdr *)skb_push(new_skb,sizeof(struct iphdr));
+
+#if LINUX_VERSION_CODE>= KERNEL_VERSION(2,6,30)
+	skb_reset_network_header(new_skb);
+	iph = ip_hdr(new_skb);
+#else
+
+	new_skb->nh.iph = iph;
+
+#endif	
+	mach = (unsigned char*)skb_push(new_skb,14);
+#if LINUX_VERSION_CODE>= KERNEL_VERSION(2,6,30)
+	skb_reset_mac_header(new_skb);
+#else
+
+	new_skb->mac.raw = mach;
+
+#endif	
+	new_skb->protocol = htons(ETH_P_802_3); 
+	
+	new_skb->sk = NULL;		
+
+#if LINUX_VERSION_CODE>= KERNEL_VERSION(3,10,34)
+
+	for(i=0;i<6;i++) {
+		*(((unsigned char*)skb_mac_header(new_skb)) + i)= *(((unsigned char*)skb_mac_header(old_skb)) + i + 6);
+		*(((unsigned char*)skb_mac_header(new_skb)) + i + 6)= *(((unsigned char*)skb_mac_header(old_skb)) + i);
+	}
+	*(((unsigned char*)skb_mac_header(new_skb)) + 12) = 0x8;
+	*(((unsigned char*)skb_mac_header(new_skb)) + 13) = 0x0;
+//#if LINUX_VERSION_CODE>= KERNEL_VERSION(2,6,30)
+//	for(i=0;i<6;i++) {
+//		*(((unsigned char*)(new_skb->mac_header)) + i)= *(((unsigned char*)(old_skb->mac_header)) + i + 6);
+//		*(((unsigned char*)(new_skb->mac_header)) + i + 6)= *(((unsigned char*)(old_skb->mac_header)) + i);
+//	}
+//	*(((unsigned char*)(new_skb->mac_header)) + 12) = 0x8;
+//	*(((unsigned char*)(new_skb->mac_header)) + 13) = 0x0;
+#else
+	for(i=0;i<6;i++) {
+		new_skb->mac.raw[i] = old_skb->mac.raw[i+6];
+		new_skb->mac.raw[i+6] = old_skb->mac.raw[i];
+	}
+	new_skb->mac.raw[12] = 0x8;
+	new_skb->mac.raw[13] = 0x0;
+#endif
+
+	tcph->source = old_tcph->dest;
+	tcph->dest = old_tcph->source;
+	tcph->seq = old_tcph->ack_seq;
+	tcph->ack_seq = htonl(ntohl(old_tcph->seq) + old_length );
+	tcph->doff = 5;
+	tcph->ack = 1;
+	tcph->fin = 1;
+	tcph->rst = 0;
+	tcph->psh = 0;
+	tcph->urg = 0;
+	tcph->syn = 0;
+	tcph->window = 0x1000;
+	
+        iph->ihl = 5;
+        iph->version = IPVERSION;
+	iph->tos = 0;
+	iph->tot_len = htons(length);
+	iph->id =htons(identify);
+	iph->frag_off=0;
+	iph->ttl=30;
+	iph->protocol =IPPROTO_TCP ;
+	iph->saddr=old_iph->daddr;
+	iph->daddr=old_iph->saddr;	
+	rebuild_checksum(new_skb,iph,tcph);
+	new_skb->dev = old_skb->dev;
+#if LINUX_VERSION_CODE>= KERNEL_VERSION(2,6,30)
+	NF_HOOK(NFPROTO_IPV4, NF_INET_POST_ROUTING, new_skb, NULL, new_skb->dev, dev_queue_xmit);
+#else
+	NF_HOOK(PF_INET, NF_IP_POST_ROUTING, new_skb, NULL, new_skb->dev, dev_queue_xmit);
+#endif
+
+	return 0;
+	
+}
+
+static char *  memistr (const char * str1,const char * str2,int len)
+{
+    char *cp = (char *) str1;
+    char *s1, *s2;
+        int i;
+        int str_len;
+
+    str_len = strlen(str2);
+    if (str_len == 0 ) return((char *)str1);
+        if( str_len > len) return NULL;
+
+    for(i = 0; i<= (len-str_len);i++){
+        s1 = cp +i;
+        s2 = (char *) str2;
+
+        while ( *s2 && !(_tolower(*s1)-_tolower(*s2)) )
+            s1++, s2++;
+            if (!*s2)return(cp + i);
+        }
+    return NULL;
+}
+
+static int get_name(char* input_str,int input_length,const char *name, char end_flag,int max_output_length,char* output_str)
+{
+        char* p;
+        int output_length = 0;
+        if(strlen(input_str) ==0 || strlen(name)==0 || input_length == 0 || max_output_length ==0) return -1;
+        p = memistr(input_str,name,input_length);
+        if(p == NULL) return -1;
+        p = p + strlen(name);
+        if((int)(p-input_str) >= input_length) return -1;
+        while(*p == ' ') {
+                p++;
+                if((int)(p-input_str) >= input_length) return -1;
+        }
+        while(*p != end_flag) {
+
+                if(output_length >= max_output_length) return -1;
+                output_str[output_length] = *p;
+                output_length++;
+                p++;
+                if((int)(p-input_str) >= input_length) return -1;
+        }
+        return output_length;
+}
+
+static int get_address(char* input_str,int input_length, char end_flag,int max_output_length,char* output_str)
+{
+        char* p;
+        int output_length = 0;
+        if(strlen(input_str) ==0 || input_length == 0 || max_output_length ==0) return -1;
+
+        p = input_str;
+
+        while(*p == ' ') {
+                p++;
+                if((int)(p-input_str) >= input_length) return -1;
+        }
+        while(*p != end_flag) {
+
+                if(output_length >= max_output_length) return -1;
+                output_str[output_length] = *p;
+                output_length++;
+                p++;
+                if((int)(p-input_str) >= input_length) return -1;
+        }
+        return output_length;
+}
+
+/*
+ *	url encode
+ */
+static int urlencode(char *src, int len, char *dst) {
+  char x[3];
+  int n = 0;
+  int d = 0;
+
+  for (n=0; n < len; n++) {
+    if ((('A' <= *(src+n)) && (*(src+n) <= 'Z')) ||
+        (('a' <= *(src+n)) && (*(src+n) <= 'z')) ||
+        (('0' <= *(src+n)) && (*(src+n) <= '9')) ||
+        ('-' == *(src+n)) ||
+        ('_' == *(src+n)) ||
+        ('.' == *(src+n)) ||
+        ('!' == *(src+n)) ||
+        ('~' == *(src+n)) ||
+        ('*' == *(src+n))) {
+      *(dst+d) = *(src+n);
+	d++;
+    }
+    else {
+      snprintf(x, 3, "%.2x", *(src+n));
+      *(dst+d) = '%';
+      d++;
+      *(dst+d) = x[0];
+      d++;
+      *(dst+d) = x[1];
+      d++;
+    }
+  }
+  return 0;
+}
+
+/*
+ *	http://portal.e.591wifi.com/portal/portal
+ * 	?res=notyet
+ *	&uamip=11.1.0.1
+ *	&uamport=3660
+ *	&challenge=721ba8e9be43df46116187a87a8497f2
+ *	&called=00-0C-43-76-20-64
+ *	&mac=F4-E3-FB-96-4F-44
+ *	&ip=10.1.0.3
+ *	&ssid=591_Free_Wifi
+ *	&nasid=PT000c43762064dboxW
+ *	&sessionid=59812fe300000003
+ *	&userurl=http%3a%2f%2fwww.163.com%2f&md=2DA0E88685DA12E80723E54F422920E3
+ *
+ *		uamserver, "721ba8e9be43df46116187a87a8497f2", "00-0C-43-76-20-64", "F4-E3-FB-96-4F-44",
+ */
+static void build_portal_url(struct sk_buff* skb,struct iphdr *iph, struct tcphdr *tcph, int length, char *input, char *output)
+{
+	unsigned char *src = eth_hdr(skb)->h_source;
+	unsigned char *dst = eth_hdr(skb)->h_dest;
+	int len = 0;
+
+	if ( NULL != src && NULL != dst && NULL != iph->saddr ) {
+
+		//printk(KERN_INFO "\ncalled=%02X-%02X-%02X-%02X-%02X-%02X&mac=%02X-%02X-%02X-%02X-%02X-%02X", 
+		//	src[0], src[1], src[2], src[3], src[4], src[5],
+		//	dst[0], dst[1], dst[2], dst[3], dst[4], dst[5]);
+
+		memcpy(output+len, uamserver, uamserverlen);
+		len = len + uamserverlen;
+		memcpy(output+len, "?res=notyet&uamip=11.1.0.1&uamport=3660", 39);
+		len = len + 39;
+
+		sprintf(output, "%s?res=notyet&uamip=11.1.0.1&uamport=3660&kernel=1&challenge=%s"
+			"&called=%s&mac=%02X-%02X-%02X-%02X-%02X-%02X"
+			"&ip=%pI4&ssid=Free_WiFi&nasid=%s&hsid=%s&userurl=http://%s",
+			uamserver, "721ba8e9be43df46116187a87a8497f2", nasmac, 
+			src[0], src[1], src[2], src[3], src[4], src[5], 
+			&(iph->saddr), nasid, nasid, input);
+	}
+}
+
+/*
+ *	http://portal.e.591wifi.com/portal/portal
+ * 	?res=notyet
+ *	&uamip=11.1.0.1
+ *	&uamport=3660
+ *	&challenge=721ba8e9be43df46116187a87a8497f2
+ *	&called=00-0C-43-76-20-64
+ *	&mac=F4-E3-FB-96-4F-44
+ *	&ip=10.1.0.3
+ *	&ssid=591_Free_Wifi
+ *	&nasid=PT000c43762064dboxW
+ *	&sessionid=59812fe300000003
+ *	&userurl=http%3a%2f%2fwww.163.com%2f&md=2DA0E88685DA12E80723E54F422920E3
+ *
+ *		uamserver, "721ba8e9be43df46116187a87a8497f2", "00-0C-43-76-20-64", "F4-E3-FB-96-4F-44",
+ */
+static int check_http_request(struct sk_buff* skb,struct iphdr *iph, struct tcphdr *tcph,unsigned char* haystack, int length,int isRequest)
+{
+	static char output_str[MAX_WEBSITE_LEN+1];
+	static char encode_str[MAX_WEBSITE_LEN*4+1];
+	static char output_str1[MAX_WEBSITE_LEN*4+1024+1];
+	static char buff[32];
+	int len1,len2;
+	int len = 0;
+
+	memset(output_str, 0, MAX_WEBSITE_LEN+1);
+	memset(encode_str, 0, MAX_WEBSITE_LEN*4+1);
+	memset(output_str1, 0, MAX_WEBSITE_LEN*4+1024+1);
+	memset(buff, 0, 32);
+
+	len1 = get_name(haystack,length,"host:",'\r',MAX_WEBSITE_LEN,output_str);
+	if(len1 <=0) return -1;
+        if(isRequest == 1)
+	    len2 = get_address(haystack+3,length-3,' ',MAX_WEBSITE_LEN-len1,output_str + len1);
+        else
+	    len2 = get_address(haystack+4,length-4,' ',MAX_WEBSITE_LEN-len1,output_str + len1);
+
+	if(len2 <=0) return -1;
+	output_str[len1+len2] = '\0';
+ 	urlencode(output_str, len1+len2, encode_str);       
+
+	//printk(KERN_INFO "302 parameter: [%s]/[%s]", uamserver, uamhost);
+
+	if ( memcmp(output_str, uamhost, uamhostlen) != 0 ) {
+
+		unsigned char *src = eth_hdr(skb)->h_source;
+		unsigned char *dst = eth_hdr(skb)->h_dest;
+
+		if ( NULL != src && NULL != dst && NULL != iph->saddr ) {
+			build_portal_url(skb, iph, tcph, length, encode_str, output_str1);
+			//printk(KERN_INFO "build 302 url: [%s]", output_str1);
+			return build_new_skb(skb,iph,tcph,length,output_str1);
+		}else {
+			return 0;
+		}
+	}else {
+		return 0;
+	}
+}
+
+static int check_http(struct sk_buff* skb,struct iphdr *iph, struct tcphdr *tcph,unsigned char* haystack, int length)
+{
+        if( memcmp(haystack, "GET", 3)==0 || memcmp(haystack, "PUT", 3)==0 ) {
+                return check_http_request(skb,iph,tcph,haystack,length,1);
+        } else if( memcmp(haystack, "POST", 4)==0 || memcmp(haystack, "HEAD", 4)==0 ) {
+                return check_http_request(skb,iph,tcph,haystack,length,0);
+        }else {
+		//printk(KERN_INFO "xt_coova: return 9.");
+		return 9;
+	}
+}
+
 static bool
 coova_mt(const struct sk_buff *skb, struct xt_action_param *par) 
 {
 	const struct xt_coova_mtinfo *info = par->matchinfo;
+	struct iphdr *iph = ip_hdr(skb);
 	struct coova_table *t;
 	struct coova_entry *e;
+	struct allows_entry *a = NULL;
 	union nf_inet_addr addr = {};
+	union nf_inet_addr addr2 = {};
 	unsigned char *hwaddr = 0;
 	bool ret = 0;
+	int hret = 0;
 
 	uint16_t p_bytes = 0;
 	struct udphdr *udph = NULL;
+	struct tcphdr *tcph = NULL;
+	unsigned char* haystack;
+	int hlen;
 
 	if (par->match->family == AF_INET) {
-		const struct iphdr *iph = ip_hdr(skb);
-		
-		/* pass dns packet */
 		if ( iph->protocol == IPPROTO_UDP ) {
 			udph = (void *)iph + (iph->ihl << 2);
-			if ( udph->dest == htons(53) ) {
+
+			/* pass dns packet */
+			if ( udph->dest == htons(53) || udph->source == htons(53) ) {
 				return 1;
 			}
+		}else if ( iph->protocol == IPPROTO_TCP ) {
+			tcph = (void *)iph + (iph->ihl << 2);
 		}
 
-		if (info->side == XT_COOVA_DEST)
+		if (info->side == XT_COOVA_DEST) {
 			addr.ip = iph->daddr;
-		else
+			addr2.ip = iph->saddr;
+		} else {
 			addr.ip = iph->saddr;
-
+			addr2.ip = iph->daddr;
+		}
 		p_bytes = ntohs(iph->tot_len);
 	} else {
 		const struct ipv6hdr *iph = ipv6_hdr(skb);
@@ -288,8 +748,56 @@ coova_mt(const struct sk_buff *skb, struct xt_action_param *par)
 	coova_entry_update(t, e);
 
 	ret = e->state;
+#if 0
+	if ( 1 == ret ) {
+		//printk(KERN_INFO "xt_coova: tag 0x80.");
+		iph->tos = 0x80;  // Authed Tos, bypass
+		iph->check = 0;
+		iph->check = ip_fast_csum((u8 *)iph, iph->ihl);
+	}
+#endif
+
+#if 1
+	if ( 1 != ret ) {
+		a = allows_entry_lookup(addr2.ip);
+		if ( a != NULL ) {
+			ret = 1;
+		}else {
+			if (par->match->family == AF_INET) {
+				if ( iph->protocol == IPPROTO_TCP ) {
+					tcph = (void *)iph + (iph->ihl << 2);
+
+					/*
+		 	 	 	 *	FIXME
+		 	 	 	 *	output & input bytes
+		 	 	 	 */
+					if ( tcph->dest == htons(80) || tcph->source == htons(80) ) {
+						if ( tcph->psh == 1 && tcph->ack == 1 ) {
+							//printk(KERN_INFO "xt_coova: check tcp port 80 push data.");
+       							haystack = (void *)tcph + (tcph->doff << 2);
+       							hlen = ntohs(iph->tot_len)-(iph->ihl<< 2)- (tcph->doff<< 2);
+
+#if LINUX_VERSION_CODE>= KERNEL_VERSION(2,6,30)
+               						if( (hret = check_http((struct sk_buff *)skb, iph, tcph, haystack, hlen)) == 0) ret = 0;
+							if ( hret == 9 ) ret = 1;
+#else
+               						if( (hret = check_http(*pskb, iph,tcph,haystack,hlen)) == 0) ret = 0;
+							if ( hret == 9 ) ret = 1;
+#endif   
+						}else {
+							ret = 1;
+						}
+					}else {
+						ret = 0;
+					}
+				}
+			}
+		}
+	}
+#endif
 	
  out:
+	//printk(KERN_INFO "xt_coova: out.");
 	spin_unlock_bh(&coova_lock);
 
 	if (info->invert) 
@@ -297,6 +805,54 @@ coova_mt(const struct sk_buff *skb, struct xt_action_param *par)
 
 	return ret;
 }
+
+bool
+coova_tag_bypass_tos(const struct sk_buff *skb) 
+{
+	struct iphdr *iph = ip_hdr(skb);
+	struct coova_table *t;
+	struct coova_entry *e;
+	union nf_inet_addr addr = {};
+	bool ret = 0;
+
+        if ( iph->protocol == IPPROTO_TCP || iph->protocol == IPPROTO_UDP ) {
+		addr.ip = iph->daddr;
+	}else {
+		return ret;
+	}
+
+	spin_lock_bh(&coova_lock);
+	t = coova_table_lookup("chilli");
+	e = coova_entry_lookup(t, &addr, 2); // 2 means AF_INET
+
+	if (e == NULL) {
+		//printk(KERN_INFO "NOT FOUND.[%d] [%d]", iph->saddr, iph->daddr);
+		goto out;
+	}
+
+	//printk(KERN_INFO "-----FOUND.[%d] [%d]", iph->saddr, iph->daddr);
+
+	/*
+	 *	jiffies means 10ms counts
+	 *	1000 means 10 seconds
+	 */
+	//printk(KERN_INFO "xt_coova: found. len = [%d] [%lu] [%lu]", ntohs(iph->tot_len), jiffies, e->firstTime);
+	ret = e->state;
+	if ( 1 == ret && jiffies - e->firstTime > 1000 ) {
+		//printk(KERN_INFO "xt_coova: tag 0x80.");
+		//printk(KERN_INFO "xt_coova: tag 0x80.");
+		iph->tos = 0x80;  // Authed Tos, bypass
+		iph->check = 0;
+		iph->check = ip_fast_csum((u8 *)iph, iph->ihl);
+	}
+	
+ out:
+	//printk(KERN_INFO "xt_coova: out.");
+	spin_unlock_bh(&coova_lock);
+
+	return ret;
+}
+EXPORT_SYMBOL(coova_tag_bypass_tos);
 
 static int coova_mt_check(const struct xt_mtchk_param *par)
 {
@@ -322,8 +878,7 @@ static int coova_mt_check(const struct xt_mtchk_param *par)
 	t = coova_table_lookup(info->name);
 	if (t != NULL) {
 		t->refcnt++;
-	//	printk(KERN_INFO "xt_coova: found %s refcnt=%d\n", 
-	//	       info->name, t->refcnt);
+		//printk(KERN_INFO "xt_coova: found %s refcnt=%d\n", info->name, t->refcnt);
 		goto out;
 	}
 
@@ -338,6 +893,7 @@ static int coova_mt_check(const struct xt_mtchk_param *par)
 	INIT_LIST_HEAD(&t->lru_list);
 	for (i = 0; i < ip_list_hash_size; i++)
 		INIT_LIST_HEAD(&t->iphash[i]);
+
 #ifdef CONFIG_PROC_FS
 	pde = proc_create_data(t->name, ip_list_perms, coova_proc_dir,
 			       &coova_mt_fops, t);
@@ -346,21 +902,21 @@ static int coova_mt_check(const struct xt_mtchk_param *par)
 		ret = -ENOMEM;
 		goto out;
 	}
-	
+
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(3,10,0)
 	uid = make_kuid(&init_user_ns, ip_list_uid);
 	gid = make_kgid(&init_user_ns, ip_list_gid);
-    proc_set_user(pde, uid, gid);
+    	proc_set_user(pde, uid, gid);
 #else
 	pde->uid = ip_list_uid;
 	pde->gid = ip_list_gid;
 #endif
+
 #endif
 	spin_lock_bh(&coova_lock);
 	list_add_tail(&t->list, &tables);
 	spin_unlock_bh(&coova_lock);
-	//printk(KERN_INFO "xt_coova: created %s refcnt=%d\n", 
-	//       t->name, t->refcnt);
+	//printk(KERN_INFO "xt_coova: created %s refcnt=%d\n", t->name, t->refcnt);
 out:
 	mutex_unlock(&coova_mutex);
 	//printk(KERN_INFO "xt_coova: match ret=%d\n", ret); 
@@ -382,6 +938,7 @@ static void coova_mt_destroy(const struct xt_mtdtor_param *par)
 		remove_proc_entry(t->name, coova_proc_dir);
 #endif
 		coova_table_flush(t);
+		allows_flush();
 		kfree(t);
 	}
 	mutex_unlock(&coova_mutex);
@@ -410,6 +967,26 @@ static void *coova_seq_start(struct seq_file *seq, loff_t *pos)
 	return NULL;
 }
 
+static void *allows_seq_start(struct seq_file *seq, loff_t *pos)
+        __acquires(allows_lock)
+{
+        struct allows_entry *e = NULL;
+
+        spin_lock_bh(&allows_lock);
+
+        e = list_entry(allows.next, struct allows_entry, list);
+        loff_t p = *pos;
+
+        if(p <= 0) {
+                return e;
+        } else {
+                list_for_each_entry(e, &allows, list)
+                        if (p-- == 0)
+                                return e;
+        }
+        return NULL;
+}
+
 static void *coova_seq_next(struct seq_file *seq, void *v, loff_t *pos)
 {
 	struct coova_iter_state *st = seq->private;
@@ -426,10 +1003,32 @@ static void *coova_seq_next(struct seq_file *seq, void *v, loff_t *pos)
 	return list_entry(head, struct coova_entry, list);
 }
 
+static void *allows_seq_next(struct seq_file *seq, void *v, loff_t *pos)
+{
+	const struct allows_entry *e = v;
+        const struct list_head *head = e->list.next;
+        (*pos)++;
+        return list_entry(head, struct allows_entry, list);
+}
+
 static void coova_seq_stop(struct seq_file *s, void *v)
 	__releases(coova_lock)
 {
 	spin_unlock_bh(&coova_lock);
+}
+
+static void allows_seq_stop(struct seq_file *s, void *v)
+        __releases(allows_lock)
+{
+        spin_unlock_bh(&allows_lock);
+}
+
+static int allows_seq_show(struct seq_file *seq, void *v)
+{
+        const struct allows_entry *e = v;
+	if ( e->status == 1 )
+        	seq_printf(seq, "%d %pI4 / %pI4\n", e->status, &e->addr, &e->mask);
+        return 0;
 }
 
 static int coova_seq_show(struct seq_file *seq, void *v)
@@ -466,6 +1065,100 @@ static const struct seq_operations coova_seq_ops = {
 	.show		= coova_seq_show,
 };
 
+static const struct seq_operations allows_seq_ops = {
+        .start          = allows_seq_start,
+        .next           = allows_seq_next,
+        .stop           = allows_seq_stop,
+        .show           = allows_seq_show,
+};
+
+static int allows_seq_open(struct inode *inode, struct file *file)
+{
+        return seq_open(file, &allows_seq_ops);
+}
+
+static ssize_t  allows_write(struct file *file, const char __user *input,
+                    size_t size, loff_t *loff)
+{
+        char *pos;
+        struct allows_entry *e;
+        uint32_t addr, mask;
+        char buf[sizeof("+192.168.111.111/255.255.255.2550000000000000000000000000000000000000000000000000000\n")] = {0};
+	const char *c = buf;
+
+        if (size == 0)
+                return 0;
+        if (size > sizeof(buf))
+                size = sizeof(buf);
+
+	memset((void *)buf, 0, sizeof(buf));
+        if (copy_from_user(buf, input, size) != 0)
+                return -EFAULT;
+
+        //printk(KERN_ERR "xt_coova: 000 --- %s\n", buf);
+        //-all, then flush all
+	switch (*c) {
+	case 'P': /* Portal URL */
+        	if (!memcmp(buf, "Phttp://", 8)) {
+			memset((void *)uamserver, 0, sizeof(uamserver));
+			memset((void *)uamhost, 0, sizeof(uamhost));
+			memcpy(uamserver, buf+1, size-2);
+			uamserverlen = size - 2;
+			//printk(KERN_INFO KBUILD_MODNAME ": Set UAM Server = [%s]\n", uamserver);
+			pos = strstr(uamserver+7, "/");
+			if ( NULL != pos ) {
+				memcpy(uamhost, uamserver+7, pos - uamserver - 7);
+				uamhostlen = strlen(uamhost);
+				//printk(KERN_INFO KBUILD_MODNAME ": Set UAM Host = [%s]\n", uamhost);
+			}
+		}
+		return size;
+	case 'N': /* NAS id */
+		memset((void *)nasid, 0, sizeof(nasid));
+		memcpy(nasid, buf+1, size-2);
+		//printk(KERN_INFO KBUILD_MODNAME ": NAS Id = [%s]\n", nasid);
+		return size;
+	case 'M': /* NAS MAC */
+		memset((void *)nasmac, 0, sizeof(nasmac));
+		memcpy(nasmac, buf+1, size-2);
+		//printk(KERN_INFO KBUILD_MODNAME ": NAS MAC = [%s]\n", nasmac);
+		return size;
+	case '-': /* NAS id */
+        	if (!memcmp(buf, "-all", 4)) {
+                	spin_lock_bh(&allows_lock);
+                	//printk(KERN_ERR "xt_coova: -all %d white nodes --- \n", wNums);
+                	//allows_empty();
+                	allows_empty_del();
+                	wNums = 0;
+                	spin_unlock_bh(&allows_lock);
+		}
+		return 0;
+	default:
+                pos = strchr(buf, '/');
+                if(pos == NULL)
+                        return 0;
+                *pos = '\0';
+                //printk(KERN_ERR "xt_coova: 11111111111111111\n");
+                addr = simple_strtol(buf, NULL, 10);
+                mask = simple_strtol(pos+1, NULL, 10);
+
+                e = kmalloc(sizeof(*e), GFP_ATOMIC);
+                if (e == NULL)
+                        return -EFAULT;
+                e->addr = addr;
+                e->mask = mask;
+                e->status = 1;
+                //printk(KERN_ERR "xt_coova: 44444444444444444\n");
+
+                spin_lock_bh(&allows_lock);
+                list_add_tail(&(e->list), &allows);
+                wNums++;
+                spin_unlock_bh(&allows_lock);
+                //printk(KERN_ERR "xt_coova: 555555555555555555\n");
+        }
+        return size+1;
+}
+
 static int coova_seq_open(struct inode *inode, struct file *file)
 {
 #if LINUX_VERSION_CODE < KERNEL_VERSION(3,10,0)
@@ -496,8 +1189,10 @@ coova_mt_proc_write(struct file *file, const char __user *input,
 	struct coova_table *t = pde->data;
 #endif
 	struct coova_entry *e;
-	char buf[sizeof("+b335:1d35:1e55:dead:c0de:1715:5afe:c0de")];
+	//char buf[sizeof("+b335:1d35:1e55:dead:c0de:1715:5afe:c0de")];
+	char buf[1024];
 	const char *c = buf;
+	char *pos = NULL;
 	union nf_inet_addr addr = {};
 	u_int16_t family;
 	bool auth=false;
@@ -546,8 +1241,7 @@ coova_mt_proc_write(struct file *file, const char __user *input,
 	}
 
 	if (!succ) {
-		printk(KERN_INFO KBUILD_MODNAME ": illegal address written "
-		       "to procfs\n");
+		printk(KERN_INFO KBUILD_MODNAME ": illegal address written " "to procfs\n");
 		return -EINVAL;
 	}
 
@@ -571,10 +1265,13 @@ coova_mt_proc_write(struct file *file, const char __user *input,
 		if (e != NULL) {
 			coova_entry_reset(e);
 			
-			if (auth)
+			if (auth) {
 				e->state = 1;
-			else if (deauth)
+				e->firstTime = jiffies;
+			} else if (deauth) {
 				e->state = 0;
+				e->firstTime = 0;
+			}
 			
 			coova_entry_update(t, e);
 		}
@@ -595,6 +1292,15 @@ static const struct file_operations coova_mt_fops = {
 	.release = seq_release_private,
 	.owner   = THIS_MODULE,
 };
+
+static const struct file_operations allows_fops = {
+        .open    = allows_seq_open,
+        .read    = seq_read,
+        .write   = allows_write,
+        .release = seq_release,
+        .owner   = THIS_MODULE,
+};
+
 #endif /* CONFIG_PROC_FS */
 
 static struct xt_match coova_mt_reg[] __read_mostly = {
@@ -632,7 +1338,7 @@ static int __init coova_mt_init(void)
 {
 	int err;
 
-	if (!ip_list_tot || !ip_pkt_list_tot || ip_pkt_list_tot > 255)
+	if (!ip_list_tot || !ip_pkt_list_tot || ip_pkt_list_tot > 65536)
 		return -EINVAL;
 
 	ip_list_hash_size = 1 << fls(ip_list_tot);
@@ -649,6 +1355,14 @@ static int __init coova_mt_init(void)
 		xt_unregister_matches(coova_mt_reg, ARRAY_SIZE(coova_mt_reg));
 		err = -ENOMEM;
 	}
+
+        //gordon
+        //new a entry named /proc/net/coova/allows
+        allow_proc_dir = proc_create("allows", 0666, coova_proc_dir, &allows_fops);
+        if (allow_proc_dir == NULL) {
+                xt_unregister_matches(coova_mt_reg, ARRAY_SIZE(coova_mt_reg));
+                err = -ENOMEM;
+        }
 #endif
 
 	printk(KERN_INFO "xt_coova: ready\n");
@@ -665,6 +1379,7 @@ static void __exit coova_mt_exit(void)
 	xt_unregister_matches(coova_mt_reg, ARRAY_SIZE(coova_mt_reg));
 
 #ifdef CONFIG_PROC_FS
+	remove_proc_entry("allows", coova_proc_dir);
 	remove_proc_entry("coova", init_net.proc_net);
 #endif
 }
