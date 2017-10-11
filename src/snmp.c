@@ -45,7 +45,7 @@ int handle_GetOnlinePortalSessions(netsnmp_mib_handler *handler,
     unsigned long int online = kmod_coova_online_sessions();
     switch (reqinfo->mode) {
     case MODE_GET:
-    	snmp_set_var_typed_value(requests->requestvb, ASN_INTEGER, &online, sizeof(int));
+    	snmp_set_var_typed_value(requests->requestvb, ASN_INTEGER, (const u_char *)&online, sizeof(int));
         break;
 
     default:
@@ -92,8 +92,8 @@ void init_chilli_snmp(void)
     }
 #else
 
-    const oid chilli_total_session_oid[] = { 1, 3, 6, 1, 4, 1, 5000, 1 };
-    const oid chilli_online_session_oid[] = { 1, 3, 6, 1, 4, 1, 5000, 2 };
+    oid chilli_total_session_oid[] = { 1, 3, 6, 1, 4, 1, 5000, 1 };
+    oid chilli_online_session_oid[] = { 1, 3, 6, 1, 4, 1, 5000, 2 };
 
     netsnmp_register_scalar(netsnmp_create_handler_registration  
     	("GetTotalPortalSessions", handle_GetTotalPortalSessions, 
