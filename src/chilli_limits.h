@@ -39,6 +39,7 @@
 #define BUCKET_SIZE_MIN                 7000 /* Minimum size of leaky bucket (~10 packets) */
 
 #define CHECK_INTERVAL                     3 /* Time between checking connections */
+#define COOVA_SYNC_INTERVAL                6 /* Time between Kernel kcoova and chilli */
 
 /* options */
 #define OPT_IPADDRLEN                    256
@@ -47,11 +48,15 @@
 /* redir */
 //#define REDIR_MAXLISTEN                   32
 //#define REDIR_MAXTIME                    120 /* Seconds */
-#define REDIR_MAXLISTEN                  128
-#define REDIR_MAXTIME                     70 /* Seconds */
-#define REDIR_HTTP_MAX_TIME               20 /* Seconds */
-#define REDIR_HTTP_SELECT_TIME             3 /* Seconds */
-#define REDIR_RADIUS_MAX_TIME             60 /* Seconds */
+//#define REDIR_MAXLISTEN                  128
+#define REDIR_MAXLISTEN                   2048
+//#define REDIR_MAXTIME                     60 /* Seconds */
+#define REDIR_MAXTIME                     30 /* Seconds */
+#define REDIR_HTTP_MAX_TIME               10 /* Seconds */
+//#define REDIR_HTTP_SELECT_TIME             3 /* Seconds */
+#define REDIR_HTTP_SELECT_TIME             2 /* Seconds */
+//#define REDIR_RADIUS_MAX_TIME             60 /* Seconds */
+#define REDIR_RADIUS_MAX_TIME             30 /* Seconds */
 #define REDIR_RADIUS_SELECT_TIME      500000 /* microseconds = 0.5 seconds */
 #define REDIR_CHALLEN                     16
 #define REDIR_MD5LEN                      16
