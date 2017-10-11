@@ -224,6 +224,7 @@ struct radius_t {
 
   struct in_addr hisaddr0;       /* Server address */
   struct in_addr hisaddr1;       /* Server address */
+  struct in_addr hisaddr_lo;       /* Server address */
   char secret[RADIUS_SECRETSIZE];/* Shared secret */
   size_t secretlen;              /* Length of sharet secret */
 
