@@ -1,6 +1,5 @@
 /* -*- mode: c; c-basic-offset: 2 -*- */
 /*
- * Copyright (C) 2003, 2004, 2005 Mondru AB.
  * Copyright (C) 2007-2012 David Bird (Coova Technologies) <support@coova.com>
  *
  * This program is free software: you can redistribute it and/or modify
@@ -20,685 +19,213 @@
 
 #include "chilli.h"
 
-/*#define _DEBUG_PRINT_ 1*/
-
-const unsigned int IPPOOL_STATSIZE = 0x10000;
-
-int ippool_print(int fd, struct ippool_t *this) {
-  int n;
-  char line[1024];
-  char useLine[16];
-  char peerLine[128];
-
-  time_t now = mainclock_now();
-
-  char * sep = "-- %-15s ------------------------------------------------------------\n";
-
-#define ERR 0
-#define USED 1
-#define FREE 2
-#define LIST 3
-  int dyn[4] = { 0, 0, 0, 0};
-  int stat[4] = { 0, 0, 0, 0};
-
-  snprintf(line, sizeof(line),
-		"DHCP lease time %d sec, grace period %d sec\n"
-		"First available dynamic %d Last %d\n"
-		"First available static %d Last %d\n"
-		"List size %d\n",
-		(int) (dhcp->lease), _options.leaseplus,
-		(int) (this->firstdyn ? this->firstdyn - this->member : -1),
-		(int) (this->lastdyn ? this->lastdyn - this->member : -1),
-		(int) (this->firststat ? this->firststat - this->member : -1),
-		(int) (this->laststat ? this->laststat - this->member : -1),
-		this->listsize);
-
-  safe_write(fd, line, strlen(line));
-
-  snprintf(line, sizeof(line), sep, "Dynamic Pool");
-  safe_write(fd, line, strlen(line));
-
-  for (n=0; n < this->listsize; n++) {
-    int *st = (n >= this->dynsize) ? stat : dyn;
-
-    if (this->member[n].in_use) {
-      if (this->member[n].next == 0 && this->member[n].prev == 0) {
-	st[USED]++;
-      } else {
-	st[ERR]++;
-      }
-    } else {
-      if (this->member[n].next == 0 &&
-	  (this->member[n].is_static ? this->laststat : this->lastdyn) != &this->member[n]) {
-	st[ERR]++;
-      } else if (this->member[n].prev == 0 &&
-                 (this->member[n].is_static ? this->firststat : this->firstdyn) != &this->member[n]) {
-	st[ERR]++;
-      } else {
-	st[FREE]++;
-      }
-    }
-
-    if (n == this->dynsize) {
-      snprintf(line, sizeof(line), sep, "Static Pool");
-      safe_write(fd, line, strlen(line));
-    }
-
-    if (this->member[n].peer) {
-      struct app_conn_t *appconn = (struct app_conn_t *) this->member[n].peer;
-      struct dhcp_conn_t *dhcpconn = (struct dhcp_conn_t *) appconn->dnlink;
-      snprintf(peerLine, sizeof(peerLine),
-		    "%s mac=%.2X-%.2X-%.2X-%.2X-%.2X-%.2X ip=%s age=%d",
-		    dhcpconn ? dhcpconn->is_reserved ? " reserved" : "" : "",
-		    appconn->hismac[0],appconn->hismac[1],appconn->hismac[2],
-		    appconn->hismac[3],appconn->hismac[4],appconn->hismac[5],
-		    inet_ntoa(appconn->hisip),
-		    dhcpconn ? ((int)(now - dhcpconn->lasttime)) : -1);
-    } else {
-      peerLine[0]=0;
-    }
-
-    if (this->member[n].in_use) {
-      snprintf(useLine, sizeof(useLine), "-inuse-");
-    } else {
-      snprintf(useLine, sizeof(useLine), "%3d/%3d",
-		    this->member[n].prev ? (int)(this->member[n].prev - this->member) : -1,
-                    this->member[n].next ? (int)(this->member[n].next - this->member) : -1);
-    }
-
-    snprintf(line, sizeof(line),
-		  "Unit %3d : %7s : %15s :%s%s\n",
-		  n, useLine,
-		  inet_ntoa(this->member[n].addr),
-		  this->member[n].is_static ? " static" : "",
-		  peerLine
-		  );
-
-    safe_write(fd, line, strlen(line));
-  }
-
-  {
-    struct ippoolm_t *p = this->firstdyn;
-    while (p) { dyn[LIST]++; p = p->next; }
-    p = this->firststat;
-    while (p) { stat[LIST]++; p = p->next; }
-  }
-
-  snprintf(line, sizeof(line),
-		"Dynamic address: free %d, avail %d, used %d, err %d, sum %d/%d%s\n",
-		dyn[FREE], dyn[LIST], dyn[USED], dyn[ERR], dyn[0]+dyn[1]+dyn[2], this->dynsize,
-		dyn[FREE] != dyn[LIST] ? " - Problem!" : "");
-  safe_write(fd, line, strlen(line));
-
-  snprintf(line, sizeof(line),
-		"Static address: free %d, avail %d, used %d, err %d, sum %d/%d%s\n",
-		stat[FREE], stat[LIST], stat[USED], stat[ERR], stat[0]+stat[1]+stat[2], this->statsize,
-		stat[FREE] != stat[LIST] ? " - Problem!" : "");
-  safe_write(fd, line, strlen(line));
-
-  return 0;
-}
-
-int ippool_hashadd(struct ippool_t *this, struct ippoolm_t *member) {
-  uint32_t hash;
-  struct ippoolm_t *p = NULL;
-  struct ippoolm_t *p_prev = NULL;
-
-  /* Insert into hash table */
-  hash = ippool_hash4(&member->addr) & this->hashmask;
-
-  for (p = this->hash[hash]; p; p = p->nexthash)
-    p_prev = p;
-
-  if (!p_prev)
-    this->hash[hash] = member;
-  else
-    p_prev->nexthash = member;
-
-  return 0; /* Always OK to insert */
-}
-
-int ippool_hashdel(struct ippool_t *this, struct ippoolm_t *member) {
-  uint32_t hash;
-  struct ippoolm_t *p = NULL;
-  struct ippoolm_t *p_prev = NULL;
-
-  /* Find in hash table */
-  hash = ippool_hash4(&member->addr) & this->hashmask;
-  for (p = this->hash[hash]; p; p = p->nexthash) {
-    if (p == member) {
-      break;
-    }
-    p_prev = p;
-  }
-
-  if (p!= member) {
-    syslog(LOG_ERR, "ippool_hashdel: Tried to delete member not in hash table");
-    return -1;
-  }
-
-  if (!p_prev)
-    this->hash[hash] = p->nexthash;
-  else
-    p_prev->nexthash = p->nexthash;
-
-  return 0;
-}
-
-uint32_t ippool_hash4(struct in_addr *addr) {
-  return lookup((unsigned char *)&addr->s_addr, sizeof(addr->s_addr), 0);
-}
-
-#ifndef IPPOOL_NOIP6
-uint32_t ippool_hash6(struct in6_addr *addr) {
-  return lookup((unsigned char *)addr->u6_addr8, sizeof(addr->u6_addr8), 0);
-}
-#endif
-
-/* Create new address pool */
-int ippool_new(struct ippool_t **this,
-	       char *dyn, int start, int end, char *stat,
-	       int allowdyn, int allowstat) {
-
-  /* Parse only first instance of pool for now */
-
-  int i;
-  struct in_addr addr;
-  struct in_addr mask;
-  struct in_addr stataddr;
-  struct in_addr statmask;
-  struct in_addr naddr;
-  uint32_t m;
-  uint32_t listsize;
-  uint32_t dynsize;
-  uint32_t statsize;
-
-  if (!allowdyn) {
-    dynsize = 0;
-  }
-  else {
-    if (option_aton(&addr, &mask, dyn, 0)) {
-      syslog(LOG_ERR, "Failed to parse dynamic pool");
-      return -1;
-    }
-
-    /* auto-dhcpstart if not already set */
-    if (!start)
-      start = ntohl(addr.s_addr & ~(mask.s_addr));
-
-    /* ensure we have the true network space */
-    addr.s_addr = addr.s_addr & mask.s_addr;
-
-    m = ntohl(mask.s_addr);
-    dynsize = ((~m)+1);
-
-    if ( ((ntohl(addr.s_addr) + start) & m) != (ntohl(addr.s_addr) & m) ) {
-      addr.s_addr = htonl(ntohl(addr.s_addr) + start);
-      syslog(LOG_ERR, "Invalid dhcpstart=%d (%s) (outside of subnet)!",
-             start, inet_ntoa(addr));
-      return -1;
-    }
-
-    if ( ((ntohl(addr.s_addr) + end) & m) != (ntohl(addr.s_addr) & m) ) {
-      syslog(LOG_ERR, "Invalid dhcpend (outside of subnet)!");
-      return -1;
-    }
-
-    if (start > 0 && end > 0) {
-
-      if (end < start) {
-	syslog(LOG_ERR, "Bad arguments dhcpstart=%d and dhcpend=%d", start, end);
-	return -1;
-      }
-
-      if ((end - start) > dynsize) {
-	syslog(LOG_ERR, "Too many IPs between dhcpstart=%d and dhcpend=%d",
-               start, end);
-	return -1;
-      }
-
-      dynsize = end - start;
-
-    } else {
-
-      if (start > 0) {
-
-	/*
-	 * if only dhcpstart is set, subtract that from count
-	 */
-	dynsize -= start;
-
-	dynsize--;/* no broadcast */
-
-      } else if (end > 0) {
-
-	/*
-	 * if only dhcpend is set, ensure only that many
-	 */
-	if (dynsize > end)
-	  dynsize = end;
-
-	dynsize--;/* no network */
-
-      } else {
-	dynsize-=2;/* no network, no broadcast */
-      }
-
-      dynsize--;/* no uamlisten */
-    }
-  }
-
-  if (!allowstat) {
-    statsize = 0;
-    stataddr.s_addr = 0;
-    statmask.s_addr = 0;
-  }
-  else {
-    if (option_aton(&stataddr, &statmask, stat, 0)) {
-      syslog(LOG_ERR, "Failed to parse static range");
-      return -1;
-    }
-
-    /* ensure we have the true network space */
-    stataddr.s_addr = stataddr.s_addr & statmask.s_addr;
-
-    m = ntohl(statmask.s_addr);
-    statsize = ((~m)+1);
-
-    if (statsize > IPPOOL_STATSIZE)
-      statsize = IPPOOL_STATSIZE;
-  }
-
-  listsize = dynsize + statsize; /* Allocate space for static IP addresses */
-
-  if (!(*this = calloc(sizeof(struct ippool_t), 1))) {
-    syslog(LOG_ERR, "Failed to allocate memory for ippool");
-    return -1;
-  }
-
-  (*this)->allowdyn  = allowdyn;
-  (*this)->allowstat = allowstat;
-  (*this)->stataddr  = stataddr;
-  (*this)->statmask  = statmask;
-
-  (*this)->dynsize   = dynsize;
-  (*this)->statsize  = statsize;
-  (*this)->listsize  = listsize;
-
-  if (!((*this)->member = calloc(sizeof(struct ippoolm_t), listsize))){
-    syslog(LOG_ERR, "Failed to allocate memory for members in ippool");
-    return -1;
-  }
-
-  for ((*this)->hashlog = 0;
-       ((1 << (*this)->hashlog) < listsize);
-       (*this)->hashlog++);
-
-  syslog(LOG_DEBUG, "Hashlog %d %d %d", (*this)->hashlog, listsize,
-         (1 << (*this)->hashlog));
-
-  /* Determine hashsize */
-  (*this)->hashsize = 1 << (*this)->hashlog; /* Fails if mask=0: All Internet*/
-  (*this)->hashmask = (*this)->hashsize -1;
-
-  /* Allocate hash table */
-  if (!((*this)->hash =
-	calloc(sizeof(struct ippoolm_t *), (*this)->hashsize))){
-    syslog(LOG_ERR, "Failed to allocate memory for hash members in ippool");
-    return -1;
-  }
-
-  if (start <= 0) /* adjust for skipping network */
-    start = 1;
-
-  (*this)->firstdyn = NULL;
-  (*this)->lastdyn = NULL;
-
-  for (i = 0; i < dynsize; i++) {
-
-    naddr.s_addr = htonl(ntohl(addr.s_addr) + i + start);
-    if (naddr.s_addr == _options.uamlisten.s_addr ||
-	naddr.s_addr == _options.dhcplisten.s_addr) {
-      start++; /* skip the uamlisten address! */
-      naddr.s_addr = htonl(ntohl(addr.s_addr) + i + start);
-    }
-
-    (*this)->member[i].addr.s_addr = naddr.s_addr;
-    (*this)->member[i].in_use = 0;
-    (*this)->member[i].is_static = 0;
-
-    /* Insert into list of unused */
-    (*this)->member[i].prev = (*this)->lastdyn;
-    if ((*this)->lastdyn) {
-      (*this)->lastdyn->next = &((*this)->member[i]);
-    }
-    else {
-      (*this)->firstdyn = &((*this)->member[i]);
-    }
-    (*this)->lastdyn = &((*this)->member[i]);
-    (*this)->member[i].next = NULL; /* Redundant */
-
-    ippool_hashadd(*this, &(*this)->member[i]);
-  }
-
-  (*this)->firststat = NULL;
-  (*this)->laststat = NULL;
-  for (i = dynsize; i < listsize; i++) {
-    (*this)->member[i].addr.s_addr = 0;
-    (*this)->member[i].in_use = 0;
-    (*this)->member[i].is_static = 1;
-
-    /* Insert into list of unused */
-    (*this)->member[i].prev = (*this)->laststat;
-    if ((*this)->laststat) {
-      (*this)->laststat->next = &((*this)->member[i]);
-    }
-    else {
-      (*this)->firststat = &((*this)->member[i]);
-    }
-    (*this)->laststat = &((*this)->member[i]);
-    (*this)->member[i].next = NULL; /* Redundant */
-  }
-
-#ifdef _DEBUG_PRINT_
-  if (_options.debug)
-    ippool_print(0, *this);
-#endif
-
-  return 0;
-}
-
-
-/* Delete existing address pool */
-int ippool_free(struct ippool_t *this) {
-  free(this->hash);
-  free(this->member);
-  free(this);
-  return 0; /* Always OK */
-}
-
-/* Find an IP address in the pool */
-int ippool_getip(struct ippool_t *this,
-		 struct ippoolm_t **member,
-		 struct in_addr *addr) {
-  struct ippoolm_t *p;
-  uint32_t hash;
-
-  /* Find in hash table */
-  hash = ippool_hash4(addr) & this->hashmask;
-  for (p = this->hash[hash]; p; p = p->nexthash) {
-    if ((p->addr.s_addr == addr->s_addr) && (p->in_use)) {
-      if (member) *member = p;
-      return 0;
-    }
-  }
-
-  if (member) *member = NULL;
-  return -1;
-}
-
-/**
- * ippool_newip
- * Get an IP address. If addr = 0.0.0.0 get a dynamic IP address. Otherwise
- * check to see if the given address is available. If available within
- * dynamic address space allocate it there, otherwise allocate within static
- * address space.
- **/
-int ippool_newip(struct ippool_t *this,
-		 struct ippoolm_t **member,
-		 struct in_addr *addr,
-		 int statip) {
-  struct ippoolm_t *p = NULL;
-  struct ippoolm_t *p2 = NULL;
-  uint32_t hash;
-
-  if (_options.debug)
-  	syslog(LOG_DEBUG, "Requesting new %s ip: %s",
-         	statip ? "static" : "dynamic", inet_ntoa(*addr));
-
-  /* If static:
-   *   Look in dynaddr.
-   *     If found remove from firstdyn/lastdyn linked list.
-   *   Else allocate from stataddr.
-   *    Remove from firststat/laststat linked list.
-   *    Insert into hash table.
-   *
-   * If dynamic
-   *   Remove from firstdyn/lastdyn linked list.
-   *
-   */
-
-#ifdef _DEBUG_PRINT_
-  if (_options.debug)
-    ippool_print(0, this);
-#endif
-
-  /* First, check to see if this type of address is allowed */
-  if ((addr) && (addr->s_addr) && statip) { /* IP address given */
-#ifdef ENABLE_UAMANYIP
-    if (!_options.uamanyip) {
-#endif
-      if (!this->allowstat) {
-	syslog(LOG_DEBUG, "Static IP address not allowed");
-	return -1;
-      }
-      if ((addr->s_addr & this->statmask.s_addr) != this->stataddr.s_addr) {
-	syslog(LOG_ERR, "Static out of range (%s)", inet_ntoa(*addr));
-	return -1;
-      }
-#ifdef ENABLE_UAMANYIP
-    }
-#endif
-  }
-  else {
-    if (!this->allowdyn) {
-      syslog(LOG_ERR, "Dynamic IP address not allowed");
-      return -1;
-    }
-  }
-
-  /* If IP address given try to find it in address pool */
-  if ((addr) && (addr->s_addr)) { /* IP address given */
-    /* Find in hash table */
-    hash = ippool_hash4(addr) & this->hashmask;
-    for (p = this->hash[hash]; p; p = p->nexthash) {
-      if (p->addr.s_addr == addr->s_addr) {
-	p2 = p;
-	break;
-      }
-    }
-  }
-
-#ifdef ENABLE_UAMANYIP
-  /* if anyip is set and statip return the same ip */
-  if (statip && _options.uamanyip && p2 && p2->is_static) {
-  	if (_options.debug)
-    		syslog(LOG_DEBUG, "Found already allocated static ip %s",
-           		inet_ntoa(p2->addr));
-    *member = p2;
-    return 0;
-  }
-#endif
-
-  /* If IP was already allocated we can not use it */
-  if ((!statip) && (p2) && (p2->in_use)) {
-    p2 = NULL;
-  }
-
-  /* If not found yet and dynamic IP then allocate dynamic IP */
-  if ((!p2) && (!statip) /*XXX: && (!addr || !addr->s_addr)*/) {
-    if (!this->firstdyn) {
-      syslog(LOG_ERR, "No more dynamic addresses available");
-      return -1;
-    }
-    else {
-      p2 = this->firstdyn;
-    }
-  }
-
-  if (p2) { /* Was allocated from dynamic address pool */
-
-    if (p2->in_use) {
-      syslog(LOG_ERR, "IP address already in use");
-      return -1; /* Already in use / Should not happen */
-    }
-
-    /* Remove from linked list of free dynamic addresses */
-
-    if (p2->is_static) {
-      syslog(LOG_ERR, "Should not happen!");
-      return -1;
-    }
-
-    if (p2->prev)
-      p2->prev->next = p2->next;
+static char * kname_fmt = "/proc/net/coova/%s";
+
+static unsigned long int totalSessions = 0;
+static unsigned long int onlineSessions = 0;
+
+static int
+kmod(char cmd, struct in_addr *addr) {
+  char file[128];
+  char line[256];
+  int fd, rd;
+
+  if (!_options.kname) return -1;
+  snprintf(file, sizeof(file), kname_fmt, _options.kname);
+  fd = open(file, O_RDWR, 0);
+  if (fd > 0) {
+    if (addr)
+      snprintf(line, sizeof(line), "%c%s\n", cmd, inet_ntoa(*addr));
     else
-      this->firstdyn = p2->next;
+      snprintf(line, sizeof(line), "%c\n", cmd);
 
-    if (p2->next)
-      p2->next->prev = p2->prev;
-    else
-      this->lastdyn = p2->prev;
-
-    p2->next = NULL;
-    p2->prev = NULL;
-    p2->in_use = 1;
-
-    *member = p2;
-
-#ifdef _DEBUG_PRINT_
-    if (_options.debug)
-      ippool_print(0, this);
-#endif
-
-    return 0; /* Success */
-  }
-
-  /* It was not possible to allocate from dynamic address pool */
-  /* Try to allocate from static address space */
-
-  if ((addr) && (addr->s_addr) && (statip
-#ifdef ENABLE_UAMANYIP
-				   || _options.uamanyip
-#endif
-				   )) { /* IP address given */
-
-    if (!this->firststat) {
-      syslog(LOG_ERR, "No more static addresses available");
-      return -1; /* No more available */
-    }
-    else {
-      p2 = this->firststat;
-    }
-
-    /* Remove from linked list of free static addresses */
-
-    if (p2->in_use) {
-      syslog(LOG_ERR, "IP address already in use");
-      return -1; /* Already in use / Should not happen */
-    }
-
-    if (!p2->is_static) {
-      syslog(LOG_ERR, "Should not happen!");
-      return -1;
-    }
-
-    if (p2->prev)
-      p2->prev->next = p2->next;
-    else
-      this->firststat = p2->next;
-
-    if (p2->next)
-      p2->next->prev = p2->prev;
-    else
-      this->laststat = p2->prev;
-
-    p2->next = NULL;
-    p2->prev = NULL;
-    p2->in_use = 1;
-
-    p2->addr.s_addr = addr->s_addr;
-
-    *member = p2;
-
-    if (_options.debug)
-    	syslog(LOG_DEBUG, "Assigned a static ip to: %s", inet_ntoa(*addr));
-
-    ippool_hashadd(this, *member);
-
-#ifdef _DEBUG_PRINT_
-    if (_options.debug)
-      ippool_print(0, this);
-#endif
-
-    return 0; /* Success */
-  }
-
-  return -1;
-}
-
-
-int ippool_freeip(struct ippool_t *this, struct ippoolm_t *member) {
-
-#ifdef _DEBUG_PRINT_
-  if (_options.debug)
-    ippool_print(0, this);
-#endif
-
-  if (!member->in_use) {
-    syslog(LOG_ERR, "Address not in use");
-    return -1; /* Not in use: Should not happen */
-  }
-
-  if (member->is_static) {
-
-    if (ippool_hashdel(this, member))
-      return -1;
-
-    member->prev = this->laststat;
-
-    if (this->laststat) {
-      this->laststat->next = member;
-    }
-    else {
-      this->firststat = member;
-    }
-
-    this->laststat = member;
-
-    member->in_use = 0;
-    member->addr.s_addr = 0;
-    member->peer = NULL;
-    member->nexthash = NULL;
-
+    rd = safe_write(fd, line, strlen(line));
+    syslog(LOG_DEBUG, "kmod wrote %d %s", rd, line);
+    close(fd);
+    return rd == strlen(line);
   } else {
+    syslog(LOG_ERR, "%s: could not open %s", strerror(errno), file);
+  }
+  return 0;
+}
 
-    member->prev = this->lastdyn;
+static int
+kmod_allows(char *cmd, char *param) {
+  char file[128];
+  char line[256];
+  int fd, rd;
 
-    if (this->lastdyn) {
-      this->lastdyn->next = member;
+  if (!_options.kname) return -1;
+  snprintf(file, sizeof(file), kname_fmt, "allows");
+  fd = open(file, O_RDWR, 0);
+  if (fd > 0) {
+      snprintf(line, sizeof(line), "%s%s\n", cmd, param);
+
+    rd = safe_write(fd, line, strlen(line));
+    syslog(LOG_DEBUG, "kmod cmd wrote %d %s", rd, line);
+    close(fd);
+    return rd == strlen(line);
+  } else {
+    syslog(LOG_ERR, "%s: could not open %s", strerror(errno), file);
+  }
+  return 0;
+}
+
+int
+kmod_coova_uamserver(char *uamserver) {
+  if (_options.debug)
+    syslog(LOG_DEBUG, "%s(%d): uamserver [%s]", __FUNCTION__, __LINE__, uamserver);
+  return kmod_allows("P", uamserver);
+}
+
+int
+kmod_coova_nasid(char *nasid) {
+  if (_options.debug)
+    syslog(LOG_DEBUG, "%s(%d): nasid [%s]", __FUNCTION__, __LINE__, nasid);
+  return kmod_allows("N", nasid);
+}
+
+int
+kmod_coova_nasmac(char *nasmac) {
+  if (_options.debug)
+    syslog(LOG_DEBUG, "%s(%d): nasmac [%s]", __FUNCTION__, __LINE__, nasmac);
+  return kmod_allows("M", nasmac);
+}
+
+int
+kmod_coova_update(struct app_conn_t *appconn) {
+  return kmod(appconn->s_state.authenticated ? '+' : '-',
+     &appconn->hisip);
+}
+
+int
+kmod_coova_release(struct dhcp_conn_t *conn) {
+  return kmod('*', &conn->hisip);
+}
+
+int
+kmod_coova_clear(void) {
+  return kmod('/', 0);
+}
+
+unsigned long int kmod_coova_total_sessions(void) {
+	return totalSessions;
+}
+
+unsigned long int kmod_coova_online_sessions(void) {
+	return onlineSessions;
+}
+
+int
+kmod_coova_sync(void) {
+  char file[128];
+  char * line = 0;
+  size_t len = 0;
+  ssize_t read;
+  FILE *fp;
+
+  char ip[256];
+  unsigned int maci[6];
+  unsigned int state;
+  unsigned long long int bin;
+  unsigned long long int bout;
+  unsigned long long int pin;
+  unsigned long long int pout;
+  struct dhcp_conn_t *conn;
+
+  unsigned long int total = 0;
+  unsigned long int online = 0;
+
+  if (!_options.kname) return -1;
+
+  snprintf(file, sizeof(file), kname_fmt, _options.kname);
+
+  fp = fopen(file, "r");
+  if (fp == NULL)
+    return -1;
+
+  while ((read = getline(&line, &len, fp)) != -1) {
+    if (len > 256) {
+      syslog(LOG_ERR, "%s: problem", strerror(errno));
+      continue;
     }
-    else {
-      this->firstdyn = member;
+
+    if (sscanf(line,
+         "mac=%X-%X-%X-%X-%X-%X "
+         "src=%s state=%u "
+         "bin=%llu bout=%llu "
+         "pin=%llu pout=%llu",
+         &maci[0], &maci[1], &maci[2], &maci[3], &maci[4], &maci[5],
+         ip, &state, &bin, &bout, &pin, &pout) == 12) {
+      uint8_t mac[6];
+      int i;
+
+      total++;
+      if ( 1 == state ) online++;
+
+      for (i=0;i<6;i++)
+        mac[i]=maci[i]&0xFF;
+
+#ifdef ENABLE_LAYER3
+      if (_options.layer3) {
+        struct in_addr in_ip;
+        struct app_conn_t *appconn = NULL;
+        if (!inet_aton(ip, &in_ip)) {
+            syslog(LOG_ERR, "Invalid IP Address: %s\n", ip);
+            return -1;
+        }
+        appconn = dhcp_get_appconn_ip(0, &in_ip);
+        if (appconn) {
+            if (_options.swapoctets) {
+                appconn->s_state.input_octets = bin;
+                appconn->s_state.output_octets = bout;
+                appconn->s_state.input_packets = pin;
+                appconn->s_state.output_packets = pout;
+            } else {
+                appconn->s_state.output_octets = bin;
+                appconn->s_state.input_octets = bout;
+                appconn->s_state.output_packets = pin;
+                appconn->s_state.input_packets = pout;
+          }
+        } else {
+            syslog(LOG_DEBUG, "Unknown entry");
+        }
+      } else {
+#endif
+        if (!dhcp_hashget(dhcp, &conn, mac)) {
+          struct app_conn_t *appconn = conn->peer;
+          if (appconn) {
+            if (_options.swapoctets) {
+              appconn->s_state.input_octets = bin;
+              appconn->s_state.output_octets = bout;
+              appconn->s_state.input_packets = pin;
+              appconn->s_state.output_packets = pout;
+            } else {
+              appconn->s_state.output_octets = bin;
+              appconn->s_state.input_octets = bout;
+              appconn->s_state.output_packets = pin;
+              appconn->s_state.input_packets = pout;
+            }
+          } else {
+            syslog(LOG_DEBUG, "Unknown entry");
+          }
+        }
+#ifdef ENABLE_LAYER3
+      }
+#endif
+    } else {
+      syslog(LOG_ERR, "%s: Error parsing %s", strerror(errno), line);
     }
-
-    this->lastdyn = member;
-
-    member->in_use = 0;
-    member->peer = NULL;
   }
 
-#ifdef _DEBUG_PRINT_
-  if (_options.debug)
-    ippool_print(0, this);
-#endif
+  if (line)
+    free(line);
+
+  fclose(fp);
+
+  totalSessions = total;
+  onlineSessions = online;
 
   return 0;
 }
 
-
-#ifndef IPPOOL_NOIP6
-extern uint32_t ippool_hash6(struct in6_addr *addr);
-extern int ippool_getip6(struct ippool_t *this, struct in6_addr *addr);
-extern int ippool_returnip6(struct ippool_t *this, struct in6_addr *addr);
-#endif
