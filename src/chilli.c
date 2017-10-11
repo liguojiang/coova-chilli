@@ -24,6 +24,10 @@
 #include "chilli_module.h"
 #endif
 
+#include <net-snmp/net-snmp-config.h>
+#include <net-snmp/net-snmp-includes.h>
+#include <net-snmp/agent/net-snmp-agent-includes.h>
+
 struct tun_t *tun;                /* TUN instance            */
 struct ippool_t *ippool;          /* Pool of IP addresses */
 struct radius_t *radius;          /* Radius client instance */
@@ -162,6 +166,10 @@ static pid_t launch_daemon(char *name, char *path) {
     chilli_binconfig(file, sizeof(file), cpid);
 
     newargs[i++] = name;
+#if(_debug_)
+      if (_options.debug)
+    	newargs[i++] = "-d";
+#endif
     newargs[i++] = "-b";
     newargs[i++] = file;
     newargs[i++] = NULL;
@@ -327,12 +335,16 @@ static void _sigchld(int signum) {
       launch_chilliproxy();
     }
 #endif
+
+#if 0
 #ifdef ENABLE_CHILLIREDIR
     if (!_options.debug && redir_pid > 0 && redir_pid == pid) {
       syslog(LOG_ERR, "Having to re-launch chilli_redir... PID %d exited", pid);
       launch_chilliredir();
     }
 #endif
+#endif
+
     if (child_remove_pid(pid) == 0)
       child_count--;
   }
@@ -376,6 +388,7 @@ static void _sigusr1(int signum) {
 static void _sighup(int signum) {
   syslog(LOG_DEBUG, "%s(%d): SIGHUP: rereading configuration", __FUNCTION__, __LINE__);
 
+  write_allows(0, 0, 0);
   do_interval = 1;
 }
 
@@ -1295,17 +1308,27 @@ static int checkconn(void) {
   struct dhcp_conn_t* dhcpconn;
   uint32_t checkdiff;
   uint32_t rereaddiff;
-
-#ifdef HAVE_NETFILTER_COOVA
-  if (_options.kname) {
-    kmod_coova_sync();
-  }
-#endif
+  static uint32_t syncdiff = 0;
 
   checkdiff = mainclock_diffu(checktime);
 
   if (checkdiff < CHECK_INTERVAL)
     return 0;
+
+  /*
+   *	FIXME
+   *	300 seconds sync once
+   */
+#ifdef HAVE_NETFILTER_COOVA
+  if (_options.kname) {
+  	if (checkdiff + syncdiff >= COOVA_SYNC_INTERVAL ) {
+    		kmod_coova_sync();
+		syncdiff = 0;
+  	}else {
+		syncdiff += checkdiff;
+	}
+  }
+#endif
 
   checktime = mainclock.tv_sec;
 
@@ -1399,10 +1422,10 @@ int chilli_req_attrs(struct radius_t *radius,
 		     uint8_t status_type,
 		     uint32_t port,
 		     uint8_t *hismac,
+		     char *shismac,
 		     struct in_addr *hisip,
 		     struct session_state *state) {
   char *sessionid = state->sessionid;
-  char mac[MACSTRLEN+1];
 
   switch(pack->code) {
     case RADIUS_CODE_ACCESS_REQUEST:
@@ -1546,11 +1569,9 @@ int chilli_req_attrs(struct radius_t *radius,
   }
 
   /* Include his MAC address */
-  if (hismac) {
-    snprintf(mac, sizeof(mac), MAC_FMT, MAC_ARG(hismac));
-
+  if (hismac && NULL != shismac ) {
     radius_addattr(radius, pack, RADIUS_ATTR_CALLING_STATION_ID, 0, 0, 0,
-		   (uint8_t*) mac, MACSTRLEN);
+		   (uint8_t*) shismac, MACSTRLEN);
   }
 
   radius_addcalledstation(radius, pack, state);
@@ -1640,7 +1661,7 @@ int chilli_auth_radius(struct radius_t *radius) {
   chilli_req_attrs(radius, &radius_pack,
 		   ACCT_USER,
 		   RADIUS_SERVICE_TYPE_ADMIN_USER, 0,
-		   0, 0, 0,
+		   0, NULL, 0, 0,
 		   &admin_session.s_state);
 
   radius_addattr(radius, &radius_pack, RADIUS_ATTR_MESSAGE_AUTHENTICATOR,
@@ -1654,7 +1675,6 @@ int static auth_radius(struct app_conn_t *appconn,
 		       uint8_t *dhcp_pkt, size_t dhcp_len) {
   struct dhcp_conn_t *dhcpconn = (struct dhcp_conn_t *)appconn->dnlink;
   struct radius_packet_t radius_pack;
-  char mac[MACSTRLEN+1];
 
   uint32_t service_type = RADIUS_SERVICE_TYPE_LOGIN;
 
@@ -1669,13 +1689,13 @@ int static auth_radius(struct app_conn_t *appconn,
   }
 
   /* Include his MAC address */
-  snprintf(mac, sizeof(mac), MAC_FMT, MAC_ARG(dhcpconn->hismac));
+  //snprintf(mac, sizeof(mac), MAC_FMT, MAC_ARG(dhcpconn->hismac));
 
   if (!username) {
 
     service_type = RADIUS_SERVICE_TYPE_FRAMED;
 
-    strlcpy(appconn->s_state.redir.username, mac, USERNAMESIZE);
+    strlcpy(appconn->s_state.redir.username, dhcpconn->shismac, USERNAMESIZE);
 
     if (_options.macsuffix) {
       size_t ulen = strlen(appconn->s_state.redir.username);
@@ -1736,7 +1756,7 @@ int static auth_radius(struct app_conn_t *appconn,
 
   chilli_req_attrs(radius, &radius_pack,
 		   ACCT_USER, service_type, 0,
-		   appconn->unit, appconn->hismac,
+		   appconn->unit, appconn->hismac, appconn->shismac,
 		   &appconn->hisip, &appconn->s_state);
 
   radius_addattr(radius, &radius_pack, RADIUS_ATTR_MESSAGE_AUTHENTICATOR,
@@ -2144,7 +2164,7 @@ static int acct_req(acct_type type,
 
   chilli_req_attrs(radius, &radius_pack,
 		   type, service_type, status_type,
-		   conn->unit, conn->hismac,
+		   conn->unit, conn->hismac, conn->shismac,
 		   &conn->hisip,
 		   &conn->s_state);
 
@@ -2345,6 +2365,7 @@ int dnprot_accept(struct app_conn_t *appconn) {
       /* This is the one and only place eapol authentication is accepted */
 
       dhcpconn->authstate = DHCP_AUTH_PASS;
+      dhcpconn->authtime = mainclock_now();
 
       /* Tell client it was successful */
       dhcp_sendEAP(dhcpconn, appconn->chal, appconn->challen);
@@ -2366,6 +2387,7 @@ int dnprot_accept(struct app_conn_t *appconn) {
 
       /* This is the one and only place UAM authentication is accepted */
       dhcpconn->authstate = DHCP_AUTH_PASS;
+      dhcpconn->authtime = mainclock_now();
       appconn->s_params.flags &= ~REQUIRE_UAM_AUTH;
       break;
 
@@ -2388,6 +2410,7 @@ int dnprot_accept(struct app_conn_t *appconn) {
       }
       else {
         dhcpconn->authstate = DHCP_AUTH_PASS;
+        dhcpconn->authtime = mainclock_now();
       }
 
       /* Tell access point it was successful */
@@ -2408,6 +2431,7 @@ int dnprot_accept(struct app_conn_t *appconn) {
                      &appconn->dns1, &appconn->dns2);
 
       dhcpconn->authstate = DHCP_AUTH_PASS;
+      dhcpconn->authtime = mainclock_now();
       break;
 
     case DNPROT_NULL:
@@ -2961,6 +2985,7 @@ int cb_redir_getstate(struct redir_t *redir,
   conn->nasip = _options.radiuslisten;
   conn->nasport = appconn->unit;
   memcpy(conn->hismac, dhcpconn->hismac, PKT_ETH_ALEN);
+  memcpy(conn->shismac, dhcpconn->shismac, MACSTRLEN+1);
   conn->ourip = appconn->ourip;
   conn->hisip = appconn->hisip;
 
@@ -3790,6 +3815,7 @@ int access_request(struct radius_packet_t *pack,
   memcpy(&appconn->radiuspeer, peer, sizeof(*peer));
   memcpy(appconn->authenticator, pack->authenticator, RADIUS_AUTHLEN);
   memcpy(appconn->hismac, dhcpconn->hismac, PKT_ETH_ALEN);
+  memcpy(appconn->shismac, dhcpconn->shismac, MACSTRLEN+1);
 
   /* Build up radius request */
   radius_pack.code = RADIUS_CODE_ACCESS_REQUEST;
@@ -3833,7 +3859,7 @@ int access_request(struct radius_packet_t *pack,
 		   ACCT_USER,
 		   _options.framedservice ? RADIUS_SERVICE_TYPE_FRAMED :
 		   RADIUS_SERVICE_TYPE_LOGIN, 0,
-		   appconn->unit, appconn->hismac,
+		   appconn->unit, appconn->hismac, appconn->shismac,
 		   &appconn->hisip, &appconn->s_state);
 
   radius_addattr(radius, &radius_pack, RADIUS_ATTR_MESSAGE_AUTHENTICATOR,
@@ -5098,14 +5124,22 @@ int cb_dhcp_request(struct dhcp_conn_t *conn, struct in_addr *addr,
   char allocate = 1;
 
 #if(_debug_)
-  syslog(LOG_DEBUG, "%s(%d): DHCP request for IP address %s", __FUNCTION__, __LINE__,
-         addr ? inet_ntoa(*addr) : "n/a");
+  if (_options.debug)
+  	syslog(LOG_DEBUG, "%s(%d): DHCP request for IP address %s", __FUNCTION__, __LINE__,
+         	addr ? inet_ntoa(*addr) : "n/a");
 #endif
 
   if (!appconn) {
     syslog(LOG_ERR, "Peer protocol not defined");
     return -1;
   }
+
+   /*
+    *      FIXME
+    *      Guojiang Li
+    *      When Request Address, Reset the first time
+    */
+   conn->packetfirsttime = mainclock_now();
 
 #ifdef ENABLE_UAMANYIP
   /* if uamanyip is on we have to filter out which ip's are allowed */
@@ -5173,8 +5207,9 @@ int cb_dhcp_request(struct dhcp_conn_t *conn, struct in_addr *addr,
 	   */
 	  upprot_getip(appconn, &appconn->reqip, 0);
 
-	  syslog(LOG_INFO, "Granted MAC=%s with IP=%s access without radius auth",
-                 mac, inet_ntoa(appconn->hisip));
+	  if (_options.debug)	
+	  	syslog(LOG_INFO, "Granted MAC=%s with IP=%s access without radius auth",
+                 	mac, inet_ntoa(appconn->hisip));
 
 	  ipm = (struct ippoolm_t*) appconn->uplink;
 	  domacauth = 0;
@@ -5227,8 +5262,8 @@ int cb_dhcp_request(struct dhcp_conn_t *conn, struct in_addr *addr,
     appconn->hismask.s_addr = _options.mask.s_addr;
 
     if (_options.debug)
-      syslog(LOG_DEBUG, "%s(%d): Client MAC="MAC_FMT" assigned IP %s" , __FUNCTION__, __LINE__,
-             MAC_ARG(conn->hismac), inet_ntoa(appconn->hisip));
+      syslog(LOG_DEBUG, "%s(%d): Client MAC="MAC_FMT" assigned IP %s, time = %ld" , __FUNCTION__, __LINE__,
+             MAC_ARG(conn->hismac), inet_ntoa(appconn->hisip), mainclock_now());
 
 #ifdef ENABLE_MODULES
     { int i;
@@ -5320,6 +5355,7 @@ int chilli_connect(struct app_conn_t **appconn, struct dhcp_conn_t *conn) {
 
   if (conn) {
     memcpy(aconn->hismac, conn->hismac, PKT_ETH_ALEN);
+    memcpy(aconn->shismac, conn->shismac, MACSTRLEN+1);
   }
 
   set_sessionid(aconn, 1);
@@ -5435,36 +5471,39 @@ int chilli_getinfo(struct app_conn_t *appconn, bstring b, int fmt) {
         bstring tmp = bfromcstr("");
 
         /* adding: session-id auth-state user-name */
-        bassignformat(tmp, " %.*s %d %.*s",
+        bassignformat(tmp, "| %.*s | %d | %*.*s",
                       appconn->s_state.sessionid[0] ? strlen(appconn->s_state.sessionid) : 1,
                       appconn->s_state.sessionid[0] ? appconn->s_state.sessionid : "-",
-                      appconn->s_state.authenticated,
+                      appconn->s_state.authenticated, 9,
                       appconn->s_state.redir.username[0] ? strlen(appconn->s_state.redir.username) : 1,
                       appconn->s_state.redir.username[0] ? appconn->s_state.redir.username : "-");
         bconcat(b, tmp);
 
+// Guojiang Li
+#if 0
         /* adding: session-time/session-timeout idle-time/idle-timeout */
-        bassignformat(tmp, " %d/%d %d/%d",
+        bassignformat(tmp, " | %d/%d\t| %d/%d",
                       sessiontime, (int)appconn->s_params.sessiontimeout,
                       idletime, (int)appconn->s_params.idletimeout);
         bconcat(b, tmp);
+#endif
 
         /* adding: input-octets/max-input-octets */
 #ifdef ENABLE_GARDENACCOUNTING
         if (_options.uamgardendata && _options.uamotherdata)
-          bassignformat(tmp, " %lld/%lld/%lld/%lld",
+          bassignformat(tmp, "\t| %lld/%lld/%lld/%lld",
                         appconn->s_state.input_octets,
                         appconn->s_params.maxinputoctets,
                         appconn->s_state.garden_input_octets,
                         appconn->s_state.other_input_octets);
         else if (_options.uamgardendata)
-          bassignformat(tmp, " %lld/%lld/%lld",
+          bassignformat(tmp, "\t| %lld/%lld/%lld",
                         appconn->s_state.input_octets,
                         appconn->s_params.maxinputoctets,
                         appconn->s_state.garden_input_octets);
         else
 #endif
-          bassignformat(tmp, " %lld/%lld",
+          bassignformat(tmp, "\t| %lld/%lld",
                         appconn->s_state.input_octets,
                         appconn->s_params.maxinputoctets);
         bconcat(b, tmp);
@@ -5472,61 +5511,67 @@ int chilli_getinfo(struct app_conn_t *appconn, bstring b, int fmt) {
         /* adding: output-octets/max-output-octets */
 #ifdef ENABLE_GARDENACCOUNTING
         if (_options.uamgardendata && _options.uamotherdata)
-          bassignformat(tmp, " %lld/%lld/%lld/%lld",
+          bassignformat(tmp, "\t| %lld/%lld/%lld/%lld",
                         appconn->s_state.output_octets,
                         appconn->s_params.maxoutputoctets,
                         appconn->s_state.garden_output_octets,
                         appconn->s_state.other_output_octets);
         else if (_options.uamgardendata)
-          bassignformat(tmp, " %lld/%lld/%lld",
+          bassignformat(tmp, "\t| %lld/%lld/%lld",
                         appconn->s_state.output_octets,
                         appconn->s_params.maxoutputoctets,
                         appconn->s_state.garden_output_octets);
         else
 #endif
-          bassignformat(tmp, " %lld/%lld",
+          bassignformat(tmp, "\t| %lld/%lld",
                         appconn->s_state.output_octets,
                         appconn->s_params.maxoutputoctets);
         bconcat(b, tmp);
 
+//Guojiang Li
+#if 0
         /* adding: max-total-octets option-swapoctets */
-        bassignformat(tmp, " %lld %d",
+        bassignformat(tmp, "\t| %lld \t| %d ",
                       appconn->s_params.maxtotaloctets, _options.swapoctets);
         bconcat(b, tmp);
+#endif
 
 #ifdef ENABLE_LEAKYBUCKET
         /* adding: max-bandwidth-up max-bandwidth-down */
         if (appconn->s_state.bucketupsize) {
-          bassignformat(tmp, " %d%%/%lld",
+          bassignformat(tmp, "\t| %d%%/%lld",
                         (int) (appconn->s_state.bucketup * 100 /
                                appconn->s_state.bucketupsize),
                         appconn->s_params.bandwidthmaxup);
           bconcat(b, tmp);
         } else
 #endif
-          bcatcstr(b, " 0/0");
+          bcatcstr(b, "\t| 0/0");
 
 #ifdef ENABLE_LEAKYBUCKET
         if (appconn->s_state.bucketdownsize) {
-          bassignformat(tmp, " %d%%/%lld ",
+          bassignformat(tmp, "\t|%d%%/%lld ",
                         (int) (appconn->s_state.bucketdown * 100 /
                                appconn->s_state.bucketdownsize),
                         appconn->s_params.bandwidthmaxdown);
           bconcat(b, tmp);
         } else
 #endif
-          bcatcstr(b, " 0/0 ");
+          bcatcstr(b, "\t| 0/0\t|");
 
+//Guojiang Li
+#if 0
         /* adding: original url */
         if (appconn->s_state.redir.userurl[0])
           bcatcstr(b, appconn->s_state.redir.userurl);
         else
           bcatcstr(b, "-");
+#endif
 
 #ifdef ENABLE_IEEE8021Q
         /* adding: vlan, if one */
         if (_options.ieee8021q && appconn->s_state.tag8021q) {
-          bassignformat(tmp, " vlan=%d",
+          bassignformat(tmp, "\t|vlan=%d",
                         (int)ntohs(appconn->s_state.tag8021q &
                                    PKT_8021Q_MASK_VID));
           bconcat(b, tmp);
@@ -5534,12 +5579,12 @@ int chilli_getinfo(struct app_conn_t *appconn, bstring b, int fmt) {
 #endif
 #ifdef ENABLE_MULTILAN
           if (app_conn_idx(appconn)) {
-            bassignformat(tmp, " vlan=%s",
+            bassignformat(tmp, "\t| vlan=%s",
                           _options.moreif[app_conn_idx(appconn)-1].vlan ?
                           _options.moreif[app_conn_idx(appconn)-1].vlan :
                           _options.moreif[app_conn_idx(appconn)-1].dhcpif);
           } else {
-            bassignformat(tmp, " vlan=%s", _options.vlan);
+            bassignformat(tmp, "\t| vlan=%s", _options.vlan);
           }
           bconcat(b, tmp);
 #endif
@@ -5550,13 +5595,14 @@ int chilli_getinfo(struct app_conn_t *appconn, bstring b, int fmt) {
 #ifdef ENABLE_LOCATION
         if (appconn->s_state.location[0]) {
           bstring tmp2 = bfromcstr("");
-          bcatcstr(b, " loc=");
+          bcatcstr(b, "\t| loc=");
           bassigncstr(tmp, appconn->s_state.location);
           redir_urlencode(tmp, tmp2);
           bconcat(b, tmp2);
           bdestroy(tmp2);
         }
 #endif
+        bcatcstr(b, "\t|");
 
         bdestroy(tmp);
       }
@@ -5631,13 +5677,13 @@ void chilli_print(bstring s, int listfmt,
 
       default:
         if (conn && !appconn)
-          bassignformat(b, MAC_FMT" %s", MAC_ARG(conn->hismac),
+          bassignformat(b, "| "MAC_FMT" | %s ", MAC_ARG(conn->hismac),
                         state2name(conn->authstate));
         else if (conn)
-          bassignformat(b, MAC_FMT" %s %s", MAC_ARG(conn->hismac),
-                        inet_ntoa(conn->hisip), state2name(conn->authstate));
+          bassignformat(b, "| "MAC_FMT" | %*.*s | %s ", MAC_ARG(conn->hismac),
+                        15, 15, inet_ntoa(conn->hisip), state2name(conn->authstate));
         else
-          bassignformat(b, "%s", inet_ntoa(appconn->hisip));
+          bassignformat(b, "| %s ", inet_ntoa(appconn->hisip));
 
         switch(listfmt) {
           case LIST_LONG_FMT:
@@ -6165,7 +6211,7 @@ int cb_dhcp_eap_ind(struct dhcp_conn_t *conn, uint8_t *pack, size_t len) {
 		   ACCT_USER,
 		   _options.framedservice ? RADIUS_SERVICE_TYPE_FRAMED :
 		   RADIUS_SERVICE_TYPE_LOGIN, 0,
-		   appconn->unit, appconn->hismac,
+		   appconn->unit, appconn->hismac, appconn->shismac, 
 		   &appconn->hisip, &appconn->s_state);
 
   radius_addattr(radius, &radius_pack, RADIUS_ATTR_MESSAGE_AUTHENTICATOR,
@@ -6382,10 +6428,17 @@ static struct app_conn_t * find_app_conn(struct cmdsock_request *req,
 
 int chilli_cmd(struct cmdsock_request *req, bstring s, int sock) {
 
+#if 0
+/*
+ *
+ *	FIXME
+ *	Not Sync from kernel
+ */
 #ifdef HAVE_NETFILTER_COOVA
   if (_options.kname) {
     kmod_coova_sync();
   }
+#endif
 #endif
 
   switch(req->type) {
@@ -6901,6 +6954,7 @@ int chilli_cmd(struct cmdsock_request *req, bstring s, int sock) {
           bcatcstr(s, "{ \"sessions\":[");
         }
 #endif
+        bcatcstr(s, "| MAC               | IP              | Stat | SessionId          | P | User            | Time/Max | Rx/Max | Tx/Max | Rx/Rate | Tx/Max |\n");
 
         appconn = find_app_conn(req, &crt);
         if (appconn) {
@@ -6922,6 +6976,7 @@ int chilli_cmd(struct cmdsock_request *req, bstring s, int sock) {
 #endif
             if (dhcp) {
               dhcpconn = dhcp->firstusedconn;
+
               while (dhcpconn) {
                 chilli_print(s, listfmt, 0, dhcpconn);
                 dhcpconn = dhcpconn->next;
@@ -7561,12 +7616,17 @@ int chilli_main(int argc, char **argv) {
     ssdp.s_addr = inet_addr(SSDP_MCAST_ADDR);
 #endif
 
-    syslog(LOG_INFO, "CoovaChilli %s. "
-           "Copyright 2002-2005 Mondru AB. Licensed under GPL. "
-           "Copyright 2006-2012 David Bird (Coova Technologies). "
-           "Licensed under GPL. "
-           "See http://coova.github.io/ for details.", VERSION);
+    syslog(LOG_INFO, "WiCloudChilli %s. "
+           "Copyright 2011-2017 Guojiang Li (Beijing Shixun Technologies). "
+           "See http://WiCloudChilli.591wifi.com/ for details.", VERSION);
 
+    /*
+     * 	Kernel Parameter
+     */
+    kmod_coova_uamserver(_options.uamurl);
+    kmod_coova_nasid(_options.radiusnasid);
+    kmod_coova_nasmac(_options.nasmac);
+	
     memset(&sctx, 0, sizeof(sctx));
 
 #ifdef HAVE_LIBRT
@@ -7881,7 +7941,14 @@ int chilli_main(int argc, char **argv) {
                    (select_callback)cmdsock_accept, 0, cmdsock);
 #endif
 
+        syslog(LOG_DEBUG, "%s(%d): CNA = %d, ANA = %d, location_82 = %d",
+		__FUNCTION__, __LINE__, _options.allowCNA, _options.allowANA, _options.location_option_82);
+
     mainclock_tick();
+
+    /* start snmp thread */
+    snmp_agent_init(); 
+
     while (keep_going) {
 
       if (reload_config) {
