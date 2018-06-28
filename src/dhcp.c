@@ -414,10 +414,10 @@ int dhcp_net_send(struct _net_interface *netif, unsigned char *hismac,
   }
 #endif
 
-#if(_debug_ > 1)
+//#if(_debug_ > 1)
   if (_options.debug)
     syslog(LOG_DEBUG, "dhcp_send() len=%zd", length);
-#endif
+//#endif
 
   return net_write_eth(netif, packet, length, &netif->dest);
 
@@ -3456,6 +3456,9 @@ int dhcp_sendOFFER(struct dhcp_conn_t *conn, uint8_t *pack, size_t len) {
   memset(packet, 0, sizeof(packet));
   pos = dhcp_create_pkt(DHCPOFFER, packet, pack, conn);
 
+  if (_options.debug)
+      syslog(LOG_DEBUG, "%s(%d): pos: %d", __FUNCTION__, __LINE__, pos);
+
   packet_iph  = pkt_iphdr(packet);
   packet_udph = pkt_udphdr(packet);
   packet_dhcp = pkt_dhcppkt(packet);
@@ -3495,6 +3498,9 @@ int dhcp_sendACK(struct dhcp_conn_t *conn, uint8_t *pack, size_t len) {
   /* Get packet default values */
   memset(packet, 0, sizeof(packet));
   pos = dhcp_create_pkt(DHCPACK, packet, pack, conn);
+
+  if (_options.debug)
+      syslog(LOG_DEBUG, "%s(%d): pos: %d", __FUNCTION__, __LINE__, pos);
 
   packet_iph  = pkt_iphdr(packet);
   packet_udph = pkt_udphdr(packet);
@@ -3536,6 +3542,9 @@ int dhcp_sendNAK(struct dhcp_conn_t *conn, uint8_t *pack, size_t len) {
   /* Get packet default values */
   memset(packet, 0, sizeof(packet));
   pos = dhcp_create_pkt(DHCPNAK, packet, pack, conn);
+
+  if (_options.debug)
+      syslog(LOG_DEBUG, "%s(%d): pos: %d", __FUNCTION__, __LINE__, pos);
 
   packet_iph  = pkt_iphdr(packet);
   packet_udph = pkt_udphdr(packet);
@@ -3868,6 +3877,7 @@ int dhcp_receive_ip(struct dhcp_ctx *ctx, uint8_t *pack, size_t len) {
   struct pkt_tcphdr_t *pack_tcph = 0;
   struct pkt_udphdr_t *pack_udph = 0;
   struct dhcp_conn_t *conn = 0;
+  struct dhcp_conn_t *dst_conn = 0;
   struct in_addr ourip;
   struct in_addr addr;
 
@@ -3882,6 +3892,8 @@ int dhcp_receive_ip(struct dhcp_ctx *ctx, uint8_t *pack, size_t len) {
 
   uint16_t iph_tot_len;
   uint16_t eth_tot_len;
+
+  syslog(LOG_DEBUG, "%s(%d): function ", __FUNCTION__, __LINE__);
 
 #if(_debug_ > 1)
   if (_options.debug)
@@ -3903,27 +3915,6 @@ int dhcp_receive_ip(struct dhcp_ctx *ctx, uint8_t *pack, size_t len) {
 #endif
     return 0;
   }
-
-  /*
-   *	FIXME
-   *	0/2/4
-   *	cluster ?
-   */
-#if 0
-#if 0
-  if ( pack_ethh->src[5] % 2 == 1 ) {
-    	if (_options.debug)
-      		syslog(LOG_DEBUG, "%s(%d): MAC/1 drop.", __FUNCTION__, __LINE__);
-	return 0;	
-  }
-#else
-  if ( pack_ethh->src[5] % 2 == 0 ) {
-    	if (_options.debug)
-      		syslog(LOG_DEBUG, "%s(%d): MAC/0 drop.", __FUNCTION__, __LINE__);
-	return 0;	
-  }
-#endif
-#endif
 
   /*
    *  Check to see if we know MAC address
@@ -3967,32 +3958,6 @@ int dhcp_receive_ip(struct dhcp_ctx *ctx, uint8_t *pack, size_t len) {
         syslog(LOG_DEBUG, "%s(%d): dropping packet; out of connections", __FUNCTION__, __LINE__);
       return 0; /* Out of connections */
     }
-
-#if 0
-	/*
-	 *	FIXME
-	 *	for stress debug 
-	 */
-	static int cs = 0;
-  	struct dhcp_conn_t *conn1 = 0;
-	if ( cs == 0 ) {
-		int css6 = 0;
-		int css5 = 0;
-		for(css5 = 0; css5 < 40; css5++) {
-			for(css6 = 0; css6 < 256; css6++) {
-				uint8_t  src[PKT_ETH_ALEN];
-				memcpy(src, pack_ethh->src, PKT_ETH_ALEN);
-				src[4] = src[4]+css5;
-				src[5] = src[5]+css6;
-    				if (dhcp_newconn(this, &conn1, src)) {
-      					if (_options.debug)
-        				syslog(LOG_DEBUG, "%s(%d): dropping packet; out of connections", __FUNCTION__, __LINE__);
-				}
-    			}
-		}
-		cs = 1;
-	}
-#endif
   }
 
   /* Return if we do not know peer */
@@ -4041,6 +4006,26 @@ int dhcp_receive_ip(struct dhcp_ctx *ctx, uint8_t *pack, size_t len) {
 
   /*
    *	FIXME
+   *	check dst tcp for 443
+   */
+  if ( ntohs(pack_tcph->src) == 443 ) {
+  	if (!dhcp_hashget(this, &dst_conn, pack_ethh->dst)) {
+  		if ( dst_conn->authstate == DHCP_AUTH_PASS ) {
+  			dst_conn->lasttime = mainclock_now();
+			if ( pack_iph->protocol == PKT_IP_PROTO_TCP ) {
+				if ( dst_conn->authdrop == 1 ) {
+					return 0;
+				}else if ( mainclock_now() - dst_conn->authtime > 10 ) {
+					dst_conn->authdrop = 1;
+					return 0;
+				}
+			}
+		}
+	}
+  }
+
+  /*
+   *	FIXME
    *	by pass TCP ACK pack
    *	( iph_tot_len == 40 || iph_tot_len == 52 ) ) {
    */
@@ -4052,107 +4037,13 @@ int dhcp_receive_ip(struct dhcp_ctx *ctx, uint8_t *pack, size_t len) {
 	if ( pack_iph->protocol == PKT_IP_PROTO_TCP ) {
 
 		if ( conn->authdrop == 1 ) {
-#if(_debug_ > 1)
-  			if (_options.debug)
-  				syslog(LOG_DEBUG, "%s(%d): ip packet length [%d] tos [%d] drop", __FUNCTION__, __LINE__, iph_tot_len, pack_iph->tos);
-#endif
 			return 0;
 		}else if ( mainclock_now() - conn->authtime > 10 ) {
-#if(_debug_ > 1)
-  			if (_options.debug)
-  				syslog(LOG_DEBUG, "%s(%d): auth pass ip packet length [%d], timedrop.", __FUNCTION__, __LINE__, iph_tot_len);
-#endif
 			conn->authdrop = 1;
 			return 0;
 		}
-
-	}
-#if 1
-  }
-
-#else
-  }else {
-
-	if ( pack_iph->protocol == PKT_IP_PROTO_TCP ) {
-    		pack_tcph = pkt_tcphdr(pack);
-
-		int tcp_syn = tcphdr_syn(pack_tcph);
-		int tcp_ack = tcphdr_ack(pack_tcph);	
-		int tcp_psh = tcphdr_psh(pack_tcph);	
-
-		if ( tcp_ack != 1 && tcp_psh != 1 && (ntohs(pack_tcph->src) == 80 || ntohs(pack_tcph->dst) == 80) ) {
-
-    			if (_options.debug)
-  				syslog(LOG_ERR, "%s(%d): not push+ack packets, drop.", __FUNCTION__, __LINE__);
-			return 0;
-
-		}else {
-    			if (_options.debug)
-  				syslog(LOG_ERR, "%s(%d): maybe port 80 and push+ack packets, accept.", __FUNCTION__, __LINE__);
-		}
-
-		/*
-	 	 *	Guojiang Li
-	 	 *	Maybe DDoS Attack
-	 	 */
-		if ( conn->packettime == mainclock_now() ) {
-			if ( tcp_syn == 1 && tcp_ack == 0 ) { //新建TCP
-				conn->synpackets++;
-			}
-			conn->packets++;
-		}else {
-			conn->packettime = mainclock_now();
-			if ( tcp_syn == 1 && tcp_ack == 0 ) { //新建TCP
-				conn->synpackets = 1;
-			}else {
-				conn->synpackets = 0;
-			}
-			conn->packets = 1;
-		}
-
-		/*
-	 	 *	may be DDoS, drop it
-	 	 */
-    		if (_options.debug)
-  			syslog(LOG_ERR, "%s(%d): new syn packets [%d].", 
-				__FUNCTION__, __LINE__, conn->synpackets);
-
-		if ( (conn->synpackets >= 3 && tcp_syn == 1 && tcp_ack == 0) || conn->packets >= 40 ) {
-			//dhcp_freeconn(conn, RADIUS_TERMINATE_CAUSE_SERVICE_UNAVAILABLE);
-			//dhcp_freeconn(conn, RADIUS_TERMINATE_CAUSE_NAS_REQUEST);
-    			if (_options.debug)
-  				syslog(LOG_ERR, "%s(%d): ip packet syn [%d] all [%d] [%ld/%ld] DDoS drop.", 
-					__FUNCTION__, __LINE__, conn->synpackets, conn->packets, conn->packettime, mainclock_now());
-			return 0;
-		}
-
-		/*
-	 	 *	may be Zombile, drop it
-	 	 */
-		time_t diffseconds = mainclock_now() - conn->packetfirsttime;
-    		if (_options.debug)
-  			syslog(LOG_ERR, "%s(%d): time diff seconds [%ld], packets [%d].", 
-				__FUNCTION__, __LINE__, diffseconds, conn->packets);
-		//if ( diffseconds >= 300 ) {
-		if ( diffseconds >= 600 ) {
-    			if (_options.debug)
-  				syslog(LOG_ERR, "%s(%d): ip packet [%ld/%ld] zombile drop.", 
-					__FUNCTION__, __LINE__, conn->packetfirsttime, mainclock_now());
-			return 0;
-		}else if ( diffseconds >= 90 ) {
-			/*
-		 	 * 	drop 0, pass 1
-		 	 */
-			if ( diffseconds%2 != 1 && tcp_syn == 1 && tcp_ack == 0 ) {
-    				if (_options.debug)
-  					syslog(LOG_ERR, "%s(%d): ip packet [%ld/%ld] interval 2 seconds drop.", 
-						__FUNCTION__, __LINE__, conn->packetfirsttime, mainclock_now());
-				return 0;
-			}
-		}
 	}
   }
-#endif
 
   if (eth_tot_len > (uint16_t) len) {
     if (_options.debug)
@@ -4211,19 +4102,14 @@ int dhcp_receive_ip(struct dhcp_ctx *ctx, uint8_t *pack, size_t len) {
     len = eth_tot_len;
   }
 
+  //syslog(LOG_DEBUG, "%s(%d): packet [%d]", __FUNCTION__, __LINE__, pack_iph->protocol);
+
   /*
    * Sanity check on UDP total length
    * Note: we cannot check fragments.
    */
   if (pack_iph->protocol == PKT_IP_PROTO_UDP) {
     pack_udph = pkt_udphdr(pack);
-
-#if(_debug_ > 1)
-    if (_options.debug)
-        syslog(LOG_DEBUG, "%s(%d): udp packet src port [%d] dst port [%d]", __FUNCTION__, __LINE__,
-              ntohs(pack_udph->src), ntohs(pack_udph->dst));
-#endif
-
     uint16_t udph_len = ntohs(pack_udph->len);
     if (udph_len < PKT_UDP_HLEN ||
         iph_tot_len < PKT_IP_HLEN + PKT_UDP_HLEN ||
@@ -4242,13 +4128,6 @@ int dhcp_receive_ip(struct dhcp_ctx *ctx, uint8_t *pack, size_t len) {
 
   if (pack_iph->protocol == PKT_IP_PROTO_TCP) {
     pack_tcph = pkt_tcphdr(pack);
-
-#if(_debug_ > 1)
-    if (_options.debug)
-        syslog(LOG_DEBUG, "%s(%d): tcp packet src port [%d] dst port [%d], flags=[%X], tos=[%X]", __FUNCTION__, __LINE__,
-              ntohs(pack_tcph->src), ntohs(pack_tcph->dst), pack_tcph->flags, pack_iph->tos);
-#endif
-
     if (iph_tot_len < PKT_IP_HLEN + PKT_TCP_HLEN) {
       if (_options.debug)
         syslog(LOG_DEBUG, "%s(%d): dropping tcp packet; ip-len=%d", __FUNCTION__, __LINE__,
@@ -5692,7 +5571,7 @@ int dhcp_decaps_cb(void *pctx, struct pkt_buffer *pb) {
       if (_options.ipv6 && _options.ipv6only)
         ignore = 1;
 #endif
-      if (!ignore)
+      if (!ignore) 
         return dhcp_receive_ip(ctx, packet, length);
       break;
 
