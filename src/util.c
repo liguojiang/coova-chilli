@@ -196,6 +196,7 @@ int write_allows(int addr, int mask, int flag)
    * gordon
    */
   char line[256] = {0};
+  syslog(LOG_DEBUG, "write allows [%d] [%d].", addr, mask);
   int fd = open("/proc/net/coova/allows", O_RDWR, 0);
   if(flag == 1) {
           if(fd > 0) {
@@ -217,4 +218,27 @@ int write_allows(int addr, int mask, int flag)
   	close(fd);
   }
   return 0;
+}
+
+int gethostbyname_async(const char *host_str, struct hostent *host) 
+{
+    struct hostent *result;
+    int herr, ret, bufsz = 512;
+    char *buff = NULL;
+    do {
+        char *new_buff = (char *)realloc(buff, bufsz);
+        if (new_buff == NULL) {
+            free(buff);
+            return ENOMEM;
+        }   
+        buff = new_buff;
+        ret = gethostbyname_r(host_str, host, buff, bufsz, &result, &herr);
+        bufsz *= 2;
+    } while (ret == ERANGE);
+    if (ret == 0 && result != NULL) 
+        ret = 0;
+    else 
+        ret = -1;
+    if ( NULL != buff ) free(buff);
+    return ret;
 }
