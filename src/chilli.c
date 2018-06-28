@@ -7944,9 +7944,6 @@ int chilli_main(int argc, char **argv) {
                    (select_callback)cmdsock_accept, 0, cmdsock);
 #endif
 
-        syslog(LOG_DEBUG, "%s(%d): CNA = %d, ANA = %d, location_82 = %d",
-		__FUNCTION__, __LINE__, _options.allowCNA, _options.allowANA, _options.location_option_82);
-
     mainclock_tick();
 
     /* start snmp thread */
