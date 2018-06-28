@@ -301,6 +301,8 @@ void snmp_agent_init(void);
 int kmod_coova_uamserver(char *uamserver);
 int kmod_coova_nasid(char *nasid);
 int kmod_coova_nasmac(char *nasmac);
+int kmod_coova_cna();
+int kmod_coova_ana();
 unsigned long int kmod_coova_total_sessions(void);
 unsigned long int kmod_coova_online_sessions(void);
 int kmod_coova_update(struct app_conn_t *appconn);
@@ -344,6 +346,7 @@ int statedir_file(char *dst, int dlen, char *file, char *deffile);
 int bblk_fromfd(bstring s, int fd, int len);
 int bstring_fromfd(bstring s, int fd);
 int write_allows(int addr, int mask, int flag);
+int gethostbyname_async(const char *host_str, struct hostent *host);
 #ifndef HAVE_GETLINE
 ssize_t getline (char** lineptr, size_t* n, FILE* stream);
 #endif
