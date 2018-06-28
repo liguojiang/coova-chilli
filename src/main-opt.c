@@ -830,19 +830,7 @@ int main(int argc, char **argv) {
 		_options.uamcode[i].jf = jf;
 		_options.uamcode[i].k = k;
      	   }
-	   
-	   for ( i = 0; i < _options.uamcodeCount; i++ ) {
-    		if (fscanf(tcpdump_output, "%u %u %u %u\n", 
-			&(_options.uamcode[i].code), 
-			&(_options.uamcode[i].jt), 
-			&(_options.uamcode[i].jf), 
-			&(_options.uamcode[i].k)) < 4 ) {
-
-   			syslog(LOG_ERR, "error in reading line number: %d\n", (i+1));
-			goto end_processing;
-		}
-    	   }
-
+	   	   
 	   pclose(tcpdump_output);
 
 	  if (pass_through_add(_options.pass_throughs,
