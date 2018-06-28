@@ -818,18 +818,16 @@ int main(int argc, char **argv) {
 		goto end_processing;
 	   }
 
-	   unsigned int code, jt, jf, k;
 	   for ( i = 0; i < _options.uamcodeCount; i++ ) {
     		if (fscanf(tcpdump_output, "%u %u %u %u\n", 
-			&code, &jt, &jf, &k) < 4 ) {
+			&(_options.uamcode[i].code), 
+			&(_options.uamcode[i].jt), 
+			&(_options.uamcode[i].jf), 
+			&(_options.uamcode[i].k)) < 4 ) {
 
    			syslog(LOG_ERR, "error in reading line number: %d\n", (i+1));
 			goto end_processing;
 		}
-		_options.uamcode[i].code = code;
-		_options.uamcode[i].jt = jt;
-		_options.uamcode[i].jf = jf;
-		_options.uamcode[i].k = k;
     	   }
 
 	   pclose(tcpdump_output);
@@ -1492,4 +1490,3 @@ end_processing:
 
   return ret;
 }
-
