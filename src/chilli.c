@@ -7617,7 +7617,7 @@ int chilli_main(int argc, char **argv) {
 #endif
 
     syslog(LOG_INFO, "WiCloudChilli %s. "
-           "Copyright 2011-2017 Guojiang Li (Beijing Shixun Technologies). "
+           "Copyright 2011-2018 Guojiang Li (Beijing Shixun Technologies). "
            "See http://WiCloudChilli.591wifi.com/ for details.", VERSION);
 
     /*
@@ -7626,7 +7626,10 @@ int chilli_main(int argc, char **argv) {
     kmod_coova_uamserver(_options.uamurl);
     kmod_coova_nasid(_options.radiusnasid);
     kmod_coova_nasmac(_options.nasmac);
-	
+    syslog(LOG_INFO, "CNA [%d], ANA [%d]\n", _options.allowCNA, _options.allowANA );
+    kmod_coova_cna(_options.allowCNA);
+    kmod_coova_ana(_options.allowANA);
+	  
     memset(&sctx, 0, sizeof(sctx));
 
 #ifdef HAVE_LIBRT
