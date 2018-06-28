@@ -36,13 +36,13 @@
 #include <linux/netfilter/x_tables.h>
 #include "xt_coova.h"
 
-MODULE_AUTHOR("David Bird <david@coova.com>");
-MODULE_DESCRIPTION("Xtables: \"coova\" module for use with CoovaChilli");
+MODULE_AUTHOR("Guojiang Li <guojiang@591wifi.com>");
+MODULE_DESCRIPTION("Xtables: \"coova\" module for use with WiCloudChilli");
 MODULE_LICENSE("GPL");
 MODULE_ALIAS("ipt_coova");
 MODULE_ALIAS("ip6t_coova");
 
-#define MAX_WEBSITE_LEN 128
+#define MAX_WEBSITE_LEN 2048
 
 static unsigned int ip_list_tot = 65536;
 static unsigned int ip_pkt_list_tot = 20;
@@ -52,13 +52,14 @@ static unsigned int ip_list_hash_size = 0;
 static unsigned int ip_list_perms = 0644;
 static unsigned int ip_list_uid = 0;
 static unsigned int ip_list_gid = 0;
-static char kuamserver[1024];
 static unsigned int uamserverlen = 0;
 static unsigned int uamhostlen = 0;
 static char uamserver[1024];
 static char uamhost[16];
 static char nasid[32];
 static char nasmac[32];
+static unsigned int cna = 0;
+static unsigned int ana = 0;
 module_param(ip_list_tot, uint, 0400);
 module_param(ip_pkt_list_tot, uint, 0400);
 module_param(ip_list_hash_size, uint, 0400);
@@ -93,6 +94,8 @@ struct coova_entry {
 	u_int64_t		bytes_out;
 	u_int64_t		pkts_in;
 	u_int64_t		pkts_out;
+	u_int8_t                is_http_10;
+	unsigned long		cna_time;
 };
 
 struct coova_table {
@@ -161,8 +164,27 @@ coova_entry_lookup(const struct coova_table *table,
 	return NULL;
 }
 
-static struct allows_entry *
-allows_entry_lookup(const u_int32_t addrp)
+static struct coova_entry *
+coova_entry_lookup_mac(const struct coova_table *table, 
+	unsigned char *hwaddr, const union nf_inet_addr *addrp, u_int16_t family)
+{
+	struct coova_entry *e;
+	unsigned int h;
+
+	if (family == AF_INET6) {
+		h = coova_entry_hash6(addrp);
+	} else {
+		h = coova_entry_hash4(addrp);
+	}
+
+	list_for_each_entry(e, &table->iphash[h], list) {
+		if ( memcmp(&e->hwaddr, hwaddr, ETH_ALEN) == 0)
+			return e;
+	}
+	return NULL;
+}
+
+static struct allows_entry * allows_entry_lookup(const u_int32_t addrp)
 {
         struct allows_entry *t;
 	int i = 0;
@@ -313,25 +335,38 @@ static void rebuild_checksum(struct sk_buff* skb, struct iphdr *iph, struct tcph
 	skb->ip_summed = CHECKSUM_NONE;
 }
 
-static int build_new_skb(struct sk_buff* old_skb,struct iphdr *old_iph,struct tcphdr *old_tcph,int old_length,char* new_website)
+static int build_new_skb(struct sk_buff* old_skb,struct iphdr *old_iph,struct tcphdr *old_tcph,int old_length,int code, char* new_website)
 {
-    unsigned char* mach;
+    	unsigned char* mach;
 	struct iphdr *iph;
 	struct tcphdr *tcph;
 	struct sk_buff * new_skb;
 	char *p;
-	char *base_data = "HTTP/1.1 302 Found\r\nLocation: ";
-	static char data[MAX_WEBSITE_LEN*4+1024+1+38]; //static char data[MAX_WEBSITE_LEN+strlen(base_data)+5];
+	char *data_302 = "HTTP/1.1 302 Found\r\nLocation: ";
+	char *data_200 = "HTTP/1.1 200 OK\r\n";
+	char *data_204 = "HTTP/1.1 204 No Content\r\n";
+	static char data[MAX_WEBSITE_LEN*4+1024+1+38];
 	int i;
         int tcplen;
 	int length ;
 	static int identify = 0;
 
 	p = data;
-	memcpy(p,(void*)base_data,strlen(base_data));
-	p = p + strlen(base_data);
+	if ( code == 302 ) {
+		memcpy(p,(void*)data_302, strlen(data_302));
+		p = p + strlen(data_302);
+	}else if ( code == 200 ) {
+		memcpy(p,(void*)data_200, strlen(data_200));
+		p = p + strlen(data_200);
+	}else if ( code == 204 ) {
+		memcpy(p,(void*)data_204, strlen(data_204));
+		p = p + strlen(data_204);
+	}else {
+		return -1;
+	}
 	memcpy(p, new_website, strlen(new_website));
 	p = p + strlen(new_website);
+
 	*p = '\r';
 	p++;
 	*p = '\n';
@@ -445,6 +480,21 @@ static int build_new_skb(struct sk_buff* old_skb,struct iphdr *old_iph,struct tc
 	
 }
 
+static int build_new_302(struct sk_buff* old_skb,struct iphdr *old_iph,struct tcphdr *old_tcph,int old_length,char* new_website)
+{
+	return build_new_skb(old_skb, old_iph, old_tcph, old_length, 302, new_website);
+}
+
+static int build_new_200(struct sk_buff* old_skb,struct iphdr *old_iph,struct tcphdr *old_tcph,int old_length,char* new_website)
+{
+	return build_new_skb(old_skb, old_iph, old_tcph, old_length, 200, new_website);
+}
+
+static int build_new_204(struct sk_buff* old_skb,struct iphdr *old_iph,struct tcphdr *old_tcph,int old_length,char* new_website)
+{
+	return build_new_skb(old_skb, old_iph, old_tcph, old_length, 204, new_website);
+}
+
 static char *  memistr (const char * str1,const char * str2,int len)
 {
     char *cp = (char *) str1;
@@ -481,8 +531,7 @@ static int get_name(char* input_str,int input_length,const char *name, char end_
                 if((int)(p-input_str) >= input_length) return -1;
         }
         while(*p != end_flag) {
-
-                if(output_length >= max_output_length) return -1;
+                if(output_length >= max_output_length) return output_length;
                 output_str[output_length] = *p;
                 output_length++;
                 p++;
@@ -504,8 +553,7 @@ static int get_address(char* input_str,int input_length, char end_flag,int max_o
                 if((int)(p-input_str) >= input_length) return -1;
         }
         while(*p != end_flag) {
-
-                if(output_length >= max_output_length) return -1;
+                if(output_length >= max_output_length) return output_length;
                 output_str[output_length] = *p;
                 output_length++;
                 p++;
@@ -526,6 +574,7 @@ static int urlencode(char *src, int len, char *dst) {
     if ((('A' <= *(src+n)) && (*(src+n) <= 'Z')) ||
         (('a' <= *(src+n)) && (*(src+n) <= 'z')) ||
         (('0' <= *(src+n)) && (*(src+n) <= '9')) ||
+        ('/' == *(src+n)) ||
         ('-' == *(src+n)) ||
         ('_' == *(src+n)) ||
         ('.' == *(src+n)) ||
@@ -570,7 +619,7 @@ static void build_portal_url(struct sk_buff* skb,struct iphdr *iph, struct tcphd
 	unsigned char *dst = eth_hdr(skb)->h_dest;
 	int len = 0;
 
-	if ( NULL != src && NULL != dst && NULL != iph->saddr ) {
+	if ( NULL != src && NULL != dst && NULL != iph ) {
 
 		//printk(KERN_INFO "\ncalled=%02X-%02X-%02X-%02X-%02X-%02X&mac=%02X-%02X-%02X-%02X-%02X-%02X", 
 		//	src[0], src[1], src[2], src[3], src[4], src[5],
@@ -606,19 +655,22 @@ static void build_portal_url(struct sk_buff* skb,struct iphdr *iph, struct tcphd
  *
  *		uamserver, "721ba8e9be43df46116187a87a8497f2", "00-0C-43-76-20-64", "F4-E3-FB-96-4F-44",
  */
-static int check_http_request(struct sk_buff* skb,struct iphdr *iph, struct tcphdr *tcph,unsigned char* haystack, int length,int isRequest)
+static int check_http_request(struct coova_entry *e, struct sk_buff* skb,struct iphdr *iph, struct tcphdr *tcph,unsigned char* haystack, int length,int isRequest)
 {
 	static char output_str[MAX_WEBSITE_LEN+1];
 	static char encode_str[MAX_WEBSITE_LEN*4+1];
 	static char output_str1[MAX_WEBSITE_LEN*4+1024+1];
-	static char buff[32];
-	int len1,len2;
-	int len = 0;
+	static char useragent_str[MAX_WEBSITE_LEN+1];
+	static char proto_str[16];
+	int len1,len2,len3, len4;
+
+	if ( e == NULL ) return -1;
 
 	memset(output_str, 0, MAX_WEBSITE_LEN+1);
 	memset(encode_str, 0, MAX_WEBSITE_LEN*4+1);
 	memset(output_str1, 0, MAX_WEBSITE_LEN*4+1024+1);
-	memset(buff, 0, 32);
+	memset(useragent_str, 0, MAX_WEBSITE_LEN+1);
+	memset(proto_str, 0, 16);
 
 	len1 = get_name(haystack,length,"host:",'\r',MAX_WEBSITE_LEN,output_str);
 	if(len1 <=0) return -1;
@@ -631,17 +683,72 @@ static int check_http_request(struct sk_buff* skb,struct iphdr *iph, struct tcph
 	output_str[len1+len2] = '\0';
  	urlencode(output_str, len1+len2, encode_str);       
 
+        if(isRequest == 1)
+	    len3 = get_address(haystack+3+len2+1, length-3-len2-1, '\r', 15, proto_str);
+        else
+	    len3 = get_address(haystack+4+len2+1, length-4-len2-1, '\r', 15, proto_str);
+
+	len4 = get_name(haystack,length,"User-Agent:",'\r', MAX_WEBSITE_LEN, useragent_str);
+
+	//printk(KERN_INFO "CNA [%d], ANA [%d]\n", cna, ana);
+	//printk(KERN_INFO "orig URL: [%s], proto [%s], user agent [%s]\n", encode_str, proto_str, useragent_str);
+
+	/* check CNA or ANA */
+	if ( len3 > 0 ) {
+
+		if ( cna > 0 ) {
+			if ( strstr(useragent_str, "CaptiveNetworkSupport") != NULL 
+				|| strstr(encode_str, "/library/test/success.html") != NULL
+				|| strstr(encode_str, "hotspot-detect.html") != NULL ) {
+
+				return build_new_200(skb,iph,tcph,length, 
+					"Content-type: text/html\r\n\r\n"
+					"<HTML><HEAD><TITLE>Success</TITLE></HEAD><BODY>"
+				);
+			}
+		}else {
+			//printk(KERN_INFO "http_10 [%d] [%s]\n", e->is_http_10, encode_str);
+			if ( memcmp(proto_str, "HTTP/1.0", 8) == 0 && strstr(useragent_str, "CaptiveNetworkSupport") != NULL ) {
+				/* 500 jiffies means 5s */
+				if ( jiffies - e->cna_time < 500 ) {
+					return build_new_200(skb,iph,tcph,length, 
+						"Content-type: text/html\r\n\r\n"
+						"<HTML><HEAD><TITLE>Success</TITLE></HEAD><BODY>"
+					);
+				}
+				e->cna_time = jiffies;
+			}else if ( memcmp(proto_str, "HTTP/1.1", 8) == 0 && 
+				( strstr(encode_str, "/library/test/success.html") != NULL
+				|| strstr(encode_str, "hotspot-detect.html") != NULL ) ) {
+
+				e->cna_time = jiffies;
+			}
+		}
+		if ( ana > 0 ) {
+			if ( strstr(encode_str, "/generate_204") != NULL ) {
+				return build_new_204(skb,iph,tcph,length, "Content-type: text/html\r\n\r\n");
+			}else if ( strstr(encode_str, "www.baidu.com") != NULL ) {
+				return build_new_302(skb,iph,tcph,length, 
+					"Cache-Control: no-cache\r\n"
+					"Content-Length: 0\r\n"
+					"Location: https://m.baidu.com/?from=844b&vit=fps\r\n\r\n"
+				);
+			}
+		}
+	}
+
 	//printk(KERN_INFO "302 parameter: [%s]/[%s]", uamserver, uamhost);
+	//printk(KERN_INFO "orig URL: [%s]", encode_str);
 
 	if ( memcmp(output_str, uamhost, uamhostlen) != 0 ) {
 
 		unsigned char *src = eth_hdr(skb)->h_source;
 		unsigned char *dst = eth_hdr(skb)->h_dest;
 
-		if ( NULL != src && NULL != dst && NULL != iph->saddr ) {
+		if ( NULL != src && NULL != dst && NULL != iph ) {
 			build_portal_url(skb, iph, tcph, length, encode_str, output_str1);
 			//printk(KERN_INFO "build 302 url: [%s]", output_str1);
-			return build_new_skb(skb,iph,tcph,length,output_str1);
+			return build_new_302(skb,iph,tcph,length, output_str1);
 		}else {
 			return 0;
 		}
@@ -650,12 +757,12 @@ static int check_http_request(struct sk_buff* skb,struct iphdr *iph, struct tcph
 	}
 }
 
-static int check_http(struct sk_buff* skb,struct iphdr *iph, struct tcphdr *tcph,unsigned char* haystack, int length)
+static int check_http(struct coova_entry *e, struct sk_buff* skb,struct iphdr *iph, struct tcphdr *tcph,unsigned char* haystack, int length)
 {
         if( memcmp(haystack, "GET", 3)==0 || memcmp(haystack, "PUT", 3)==0 ) {
-                return check_http_request(skb,iph,tcph,haystack,length,1);
+                return check_http_request(e, skb,iph,tcph,haystack,length,1);
         } else if( memcmp(haystack, "POST", 4)==0 || memcmp(haystack, "HEAD", 4)==0 ) {
-                return check_http_request(skb,iph,tcph,haystack,length,0);
+                return check_http_request(e, skb,iph,tcph,haystack,length,0);
         }else {
 		//printk(KERN_INFO "xt_coova: return 9.");
 		return 9;
@@ -726,10 +833,18 @@ coova_mt(const struct sk_buff *skb, struct xt_action_param *par)
 	t = coova_table_lookup(info->name);
 	e = coova_entry_lookup(t, &addr, par->match->family);
 
+	if ( e == NULL ) {
+		if ( hwaddr ) {
+			e = coova_entry_lookup_mac(t, hwaddr, &addr, par->match->family);
+		}
+	}
+
 	if (e == NULL) {
 		e = coova_entry_init(t, &addr, par->match->family);
-		if (e == NULL)
+		if (e == NULL) {
+			spin_unlock_bh(&coova_lock);
 			goto out;
+		}
 	}
 
 	if (hwaddr)
@@ -748,6 +863,9 @@ coova_mt(const struct sk_buff *skb, struct xt_action_param *par)
 	coova_entry_update(t, e);
 
 	ret = e->state;
+
+	spin_unlock_bh(&coova_lock);
+
 #if 0
 	if ( 1 == ret ) {
 		//printk(KERN_INFO "xt_coova: tag 0x80.");
@@ -759,10 +877,12 @@ coova_mt(const struct sk_buff *skb, struct xt_action_param *par)
 
 #if 1
 	if ( 1 != ret ) {
+		//printk(KERN_INFO "allows check .[%d]\n", addr2.ip);
 		a = allows_entry_lookup(addr2.ip);
 		if ( a != NULL ) {
 			ret = 1;
 		}else {
+			//printk(KERN_INFO "allows check not found.[%d]\n", addr2.ip);
 			if (par->match->family == AF_INET) {
 				if ( iph->protocol == IPPROTO_TCP ) {
 					tcph = (void *)iph + (iph->ihl << 2);
@@ -778,10 +898,10 @@ coova_mt(const struct sk_buff *skb, struct xt_action_param *par)
        							hlen = ntohs(iph->tot_len)-(iph->ihl<< 2)- (tcph->doff<< 2);
 
 #if LINUX_VERSION_CODE>= KERNEL_VERSION(2,6,30)
-               						if( (hret = check_http((struct sk_buff *)skb, iph, tcph, haystack, hlen)) == 0) ret = 0;
+               						if( (hret = check_http(e, (struct sk_buff *)skb, iph, tcph, haystack, hlen)) == 0) ret = 0;
 							if ( hret == 9 ) ret = 1;
 #else
-               						if( (hret = check_http(*pskb, iph,tcph,haystack,hlen)) == 0) ret = 0;
+               						if( (hret = check_http(e, *pskb, iph,tcph,haystack,hlen)) == 0) ret = 0;
 							if ( hret == 9 ) ret = 1;
 #endif   
 						}else {
@@ -798,7 +918,6 @@ coova_mt(const struct sk_buff *skb, struct xt_action_param *par)
 	
  out:
 	//printk(KERN_INFO "xt_coova: out.");
-	spin_unlock_bh(&coova_lock);
 
 	if (info->invert) 
 		ret = !ret;
@@ -1017,7 +1136,7 @@ static void coova_seq_stop(struct seq_file *s, void *v)
 	spin_unlock_bh(&coova_lock);
 }
 
-static void allows_seq_stop(struct seq_file *s, void *v)
+static void allows_seq_stop(struct seq_file *seq, void *v)
         __releases(allows_lock)
 {
         spin_unlock_bh(&allows_lock);
@@ -1083,7 +1202,7 @@ static ssize_t  allows_write(struct file *file, const char __user *input,
         char *pos;
         struct allows_entry *e;
         uint32_t addr, mask;
-        char buf[sizeof("+192.168.111.111/255.255.255.2550000000000000000000000000000000000000000000000000000\n")] = {0};
+        char buf[512] = {0};
 	const char *c = buf;
 
         if (size == 0)
@@ -1095,7 +1214,7 @@ static ssize_t  allows_write(struct file *file, const char __user *input,
         if (copy_from_user(buf, input, size) != 0)
                 return -EFAULT;
 
-        //printk(KERN_ERR "xt_coova: 000 --- %s\n", buf);
+        //printk(KERN_ERR "xt_coova: allows_write [%s]\n", buf);
         //-all, then flush all
 	switch (*c) {
 	case 'P': /* Portal URL */
@@ -1122,6 +1241,17 @@ static ssize_t  allows_write(struct file *file, const char __user *input,
 		memset((void *)nasmac, 0, sizeof(nasmac));
 		memcpy(nasmac, buf+1, size-2);
 		//printk(KERN_INFO KBUILD_MODNAME ": NAS MAC = [%s]\n", nasmac);
+		return size;
+	case 'C': /* CNA or ANA */
+        	if ( memcmp(buf+1, "CNA", 3) == 0 ) {
+			cna = 1;
+		}else if ( memcmp(buf+1, "-CNA", 4) == 0 ) {
+			cna = 0;
+		}else if ( memcmp(buf+1, "ANA", 3) == 0 ) {
+			ana = 1;
+		}else if ( memcmp(buf+1, "-ANA", 4) == 0 ) {
+			ana = 0;
+		}
 		return size;
 	case '-': /* NAS id */
         	if (!memcmp(buf, "-all", 4)) {
@@ -1151,8 +1281,10 @@ static ssize_t  allows_write(struct file *file, const char __user *input,
                 //printk(KERN_ERR "xt_coova: 44444444444444444\n");
 
                 spin_lock_bh(&allows_lock);
-                list_add_tail(&(e->list), &allows);
-                wNums++;
+		if ( NULL == allows_entry_lookup(addr) ) {
+                	list_add_tail(&(e->list), &allows);
+                	wNums++;
+		}
                 spin_unlock_bh(&allows_lock);
                 //printk(KERN_ERR "xt_coova: 555555555555555555\n");
         }
@@ -1192,7 +1324,6 @@ coova_mt_proc_write(struct file *file, const char __user *input,
 	//char buf[sizeof("+b335:1d35:1e55:dead:c0de:1715:5afe:c0de")];
 	char buf[1024];
 	const char *c = buf;
-	char *pos = NULL;
 	union nf_inet_addr addr = {};
 	u_int16_t family;
 	bool auth=false;
@@ -1255,7 +1386,6 @@ coova_mt_proc_write(struct file *file, const char __user *input,
 			coova_entry_remove(t, e);
 
 	} else {
-
 		if (e == NULL) {
 			coova_entry_init(t, &addr, family);
 		} 
