@@ -7947,7 +7947,9 @@ int chilli_main(int argc, char **argv) {
     mainclock_tick();
 
     /* start snmp thread */
+#if 0
     snmp_agent_init(); 
+#endif
 
     while (keep_going) {
 
