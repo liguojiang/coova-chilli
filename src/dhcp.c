@@ -3243,6 +3243,8 @@ dhcp_handler(int type,
   struct app_conn_t *appconn = 0;
 //#endif
 
+#ifdef ENABLE_LOCATION
+
 /*
  *	FIXME
  *	Guojiang Li
@@ -3377,7 +3379,6 @@ if (_options.location_option_82) {
     }
 }
 
-#ifdef ENABLE_LOCATION
   if (_options.location_option_82) {
     switch(type) {
       case CHILLI_DHCP_PROXY:
