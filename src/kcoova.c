@@ -93,6 +93,32 @@ kmod_coova_nasmac(char *nasmac) {
 }
 
 int
+kmod_coova_cna(unsigned int cna) {
+  if ( cna ) {
+  	if (_options.debug)
+    		syslog(LOG_DEBUG, "%s(%d): enable iPhone CNA", __FUNCTION__, __LINE__);
+  	return kmod_allows("C", "CNA");
+  }else {
+  	if (_options.debug)
+    		syslog(LOG_DEBUG, "%s(%d): disable iPhone CNA", __FUNCTION__, __LINE__);
+  	return kmod_allows("C", "-CNA");
+  }
+}
+
+int
+kmod_coova_ana(unsigned int ana) {
+  if ( ana ) {
+  	if (_options.debug)
+    		syslog(LOG_DEBUG, "%s(%d): enable Android ANA", __FUNCTION__, __LINE__);
+  	return kmod_allows("C", "ANA");
+  }else {
+  	if (_options.debug)
+    		syslog(LOG_DEBUG, "%s(%d): disable Android ANA", __FUNCTION__, __LINE__);
+  	return kmod_allows("C", "-ANA");
+  }
+}
+
+int
 kmod_coova_update(struct app_conn_t *appconn) {
   return kmod(appconn->s_state.authenticated ? '+' : '-',
      &appconn->hisip);
@@ -125,6 +151,7 @@ kmod_coova_sync(void) {
   FILE *fp;
 
   char ip[256];
+  struct in_addr in_ip;
   unsigned int maci[6];
   unsigned int state;
   unsigned long long int bin;
@@ -166,9 +193,10 @@ kmod_coova_sync(void) {
       for (i=0;i<6;i++)
         mac[i]=maci[i]&0xFF;
 
+      syslog(LOG_ERR, "kmod sync: %s\n", ip);
+
 #ifdef ENABLE_LAYER3
       if (_options.layer3) {
-        struct in_addr in_ip;
         struct app_conn_t *appconn = NULL;
         if (!inet_aton(ip, &in_ip)) {
             syslog(LOG_ERR, "Invalid IP Address: %s\n", ip);
@@ -207,8 +235,11 @@ kmod_coova_sync(void) {
               appconn->s_state.input_packets = pout;
             }
           } else {
-            syslog(LOG_DEBUG, "Unknown entry");
+            	syslog(LOG_DEBUG, "Unknown %s.", ip);
           }
+        }else {
+          syslog(LOG_DEBUG, "Unknown %s, remove it.", ip);
+	  total--;
         }
 #ifdef ENABLE_LAYER3
       }
@@ -228,4 +259,3 @@ kmod_coova_sync(void) {
 
   return 0;
 }
-
