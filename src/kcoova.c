@@ -151,7 +151,6 @@ kmod_coova_sync(void) {
   FILE *fp;
 
   char ip[256];
-  struct in_addr in_ip;
   unsigned int maci[6];
   unsigned int state;
   unsigned long long int bin;
