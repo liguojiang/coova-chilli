@@ -479,7 +479,8 @@ int pass_throughs_from_string(pass_through *ptlist, uint32_t ptlen,
 			      , patricia_tree_t *ptree
 #endif
 			      ) {
-  struct hostent *host;
+  struct hostent he;
+  struct hostent *host = &he;
   pass_through pt;
   char *t  = NULL, 
        *p1 = NULL, 
@@ -584,7 +585,7 @@ int pass_throughs_from_string(pass_through *ptlist, uint32_t ptlen,
       int j = 0;
       pt.mask.s_addr = 0xffffffff;
 
-      if (!(host = gethostbyname(p1))) {
+      if ( 0 != gethostbyname_async(p1, host) ) {
 	syslog(LOG_ERR, "%s: Invalid uamallowed domain or address: %s!", strerror(errno), p1);
 	continue;
       }
