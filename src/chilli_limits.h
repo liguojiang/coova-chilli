@@ -39,7 +39,7 @@
 #define BUCKET_SIZE_MIN                 7000 /* Minimum size of leaky bucket (~10 packets) */
 
 #define CHECK_INTERVAL                     3 /* Time between checking connections */
-#define COOVA_SYNC_INTERVAL                6 /* Time between Kernel kcoova and chilli */
+#define COOVA_SYNC_INTERVAL              300 /* Time between Kernel kcoova and chilli */
 
 /* options */
 #define OPT_IPADDRLEN                    256
