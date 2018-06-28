@@ -59,14 +59,15 @@ int conn_sock(struct conn_t *conn, struct in_addr *addr, int port) {
 
 int conn_setup(struct conn_t *conn, char *hostname,
 	       int port, bstring bwrite, bstring bread) {
-  struct hostent *host;
+  struct hostent he;
+  struct hostent *host = &he;
 
   conn->write_pos = 0;
   conn->write_buf = bwrite;
   conn->read_pos = 0;
   conn->read_buf = bread;
 
-  if (!(host = gethostbyname(hostname)) || !host->h_addr_list[0]) {
+  if ( 0 != gethostbyname_async(hostname, host) || !host->h_addr_list[0] ) {
     syslog(LOG_ERR, "Could not resolve IP address of uamserver: %s! [%s]",
            hostname, strerror(errno));
     return -1;
