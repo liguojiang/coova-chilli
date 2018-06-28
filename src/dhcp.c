@@ -3239,11 +3239,8 @@ dhcp_handler(int type,
 	     uint8_t *pack, size_t len,
 	     uint8_t *packet, size_t pos) {
 
-//#if defined(ENABLE_LOCATION) || defined(ENABLE_MODULES)
+#if defined(ENABLE_LOCATION) || defined(ENABLE_MODULES)
   struct app_conn_t *appconn = 0;
-//#endif
-
-#ifdef ENABLE_LOCATION
 
 /*
  *	FIXME
